@@ -66,7 +66,7 @@ html, body {
 
 body {
   display: grid;
-  grid-template-columns: 264px 1fr;
+  grid-template-columns: var(--sidebar-w, 264px) 1fr;
   font-family: var(--ui);
   font-size: 15px;
   line-height: 1.4;
@@ -103,6 +103,13 @@ svg { display: block; }
 
 #sidebar :focus-visible { outline-color: #A9C7B6; }
 
+/* While the sidebar slides shut, clip the content instead of squashing it */
+#sidebar { min-width: 0; overflow-x: hidden; }
+#note-list { flex: 1; }
+@media (min-width: 801px) {
+  #sidebar > * { min-width: calc(var(--sidebar-w, 264px) - 24px); }
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -117,6 +124,33 @@ svg { display: block; }
   width: 30px;
   height: 30px;
   fill: #E8EFEB;
+}
+
+#collapse-sidebar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--side-dim);
+}
+
+#collapse-sidebar:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+
+#collapse-sidebar svg,
+#expand-sidebar svg,
+#mini-nav svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* the little sun: the only marigold in the sidebar */
@@ -250,6 +284,49 @@ svg { display: block; }
 .note-link:hover { background: rgba(255, 255, 255, 0.06); }
 .note-link.current { background: var(--pine); color: #fff; font-weight: 600; }
 
+/* Notes picked with Ctrl/Shift+click */
+.note-link.selected { background: rgba(255, 255, 255, 0.16); color: #fff; box-shadow: inset 2px 0 0 #A9C7B6; }
+.note-link.selected.current { background: var(--pine); }
+
+/* Action bar for several selected notes, pinned to the bottom of the sidebar */
+#select-bar {
+  position: sticky;
+  bottom: -16px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 0 -4px -4px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-big);
+  background: #1F4A3C;
+  box-shadow: 0 -8px 16px rgba(0, 0, 0, 0.18);
+}
+
+#select-bar[hidden] { display: none; }
+
+#select-count {
+  grid-column: 1 / -1;
+  padding: 0 2px 2px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+}
+
+#select-bar button {
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--side-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#select-bar button:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+#select-bar #select-move { grid-column: 1 / -1; background: rgba(255, 255, 255, 0.12); color: #fff; }
+#select-bar #select-delete:hover { background: #8E3324; border-color: #8E3324; color: #fff; }
+
 #note-list small {
   display: block;
   padding: 0 8px 8px;
@@ -261,6 +338,88 @@ svg { display: block; }
 }
 
 .sidebar-empty { margin: 0; padding: 0 8px; font-size: 14px; color: var(--side-dim); }
+
+/* ================= Sidebar edge, mini bar, collapsed state ================= */
+
+#sidebar-resizer {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-w, 264px) - 3px);
+  z-index: 15;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* thin line that shows on hover, drag and keyboard focus */
+#sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+#sidebar-resizer:hover::after,
+#sidebar-resizer:focus-visible::after,
+body.resizing #sidebar-resizer::after { background: var(--focus); }
+#sidebar-resizer:focus-visible { outline: none; }
+
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing iframe { pointer-events: none; }
+
+#mini-nav { display: none; }
+
+@media (min-width: 801px) {
+  html.sidebar-collapsed body { grid-template-columns: 0 1fr; }
+  html.sidebar-collapsed #sidebar { visibility: hidden; padding-left: 0; padding-right: 0; }
+  html.sidebar-collapsed #sidebar-resizer { display: none; }
+
+  /* animation for hide/show only (JS adds the class briefly, never while dragging) */
+  html.sidebar-animating body { transition: grid-template-columns 0.2s ease; }
+
+  /* Small floating bar: show the sidebar again, switch between the three views */
+  html.sidebar-collapsed #mini-nav {
+    position: fixed;
+    top: 12px;
+    left: 16px;
+    z-index: 15;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--mist);
+    border-radius: var(--radius-big);
+    background: var(--paper);
+    box-shadow: var(--shadow);
+  }
+
+  html.sidebar-collapsed .view { padding-top: 62px; }
+
+  #mini-nav button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 32px;
+    border: 0;
+    border-radius: var(--radius-small);
+    background: transparent;
+    color: var(--stone);
+  }
+
+  #mini-nav button:hover { background: var(--moss-soft); color: var(--granite); }
+  #mini-nav button.active { background: var(--pine); color: #fff; }
+  #mini-nav #expand-sidebar { margin-right: 4px; border-right: 1px solid var(--mist); border-radius: var(--radius-small) 0 0 var(--radius-small); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.sidebar-animating body { transition: none; }
+}
 
 /* ================= Main area ================= */
 
@@ -558,6 +717,48 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 }
 
 .editor-preview-side { border-color: var(--mist); }
+
+.editor-preview img, .editor-preview-side img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-small);
+}
+
+/* Numbered lists in the preview read 1. / 1.1. / 1.1.1. (the file itself stays 1. 2. 3.)
+   Each <ol> starts its own counter; counters() joins the levels with dots. */
+.editor-preview ol, .editor-preview-side ol {
+  --num-w: 2.2em;                 /* room for the number; wider for deeper levels */
+  counter-reset: item;
+  list-style: none;
+  margin: 0.4em 0;
+  padding-left: var(--num-w);
+}
+
+.editor-preview ol ol, .editor-preview-side ol ol { --num-w: 3.2em; margin: 0.15em 0; }
+.editor-preview ol ol ol, .editor-preview-side ol ol ol { --num-w: 4.2em; }
+.editor-preview ol ol ol ol, .editor-preview-side ol ol ol ol { --num-w: 5.2em; }
+
+.editor-preview ol > li, .editor-preview-side ol > li {
+  position: relative;
+  counter-increment: item;
+}
+
+/* The number hangs in the left margin, right-aligned, so the text lines up at every level */
+.editor-preview ol > li::before, .editor-preview-side ol > li::before {
+  content: counters(item, ".") ".";
+  position: absolute;
+  left: calc(-1 * var(--num-w));
+  width: calc(var(--num-w) - 0.6em);
+  text-align: right;
+  font-family: var(--ui);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--stone);
+}
+
+/* a task inside a numbered list: keep the checkbox next to the text */
+.editor-preview ol > li > input[type="checkbox"],
+.editor-preview-side ol > li > input[type="checkbox"] { margin: 0 0.4em 0 0; }
 
 /* ================= Calendar (FullCalendar) ================= */
 
@@ -866,7 +1067,18 @@ dialog input[type="text"], dialog input:not([type]), dialog input[type="date"], 
   color: var(--granite);
 }
 
-dialog input:focus { border-color: var(--focus); outline: none; }
+dialog select {
+  padding: 9px 10px;
+  border: 1px solid var(--mist);
+  border-radius: var(--radius-small);
+  background: var(--snow);
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--granite);
+}
+
+dialog input:focus, dialog select:focus { border-color: var(--focus); outline: none; }
+dialog form > label[hidden] { display: none; }
 
 dialog form > label { margin-bottom: 14px; }
 
@@ -959,6 +1171,7 @@ dialog .actions {
 
   /* The three views move to a tab bar at the bottom (thumb reach) */
   .views { display: none; }
+  #sidebar-resizer, #collapse-sidebar { display: none; }
 
   main { height: calc(100vh - 62px); height: calc(100dvh - 62px); }
 

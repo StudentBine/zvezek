@@ -13,18 +13,23 @@ async function api(url, options = {}) {
   return data;
 }
 
-function toast(message, isError = false) {
+function toast(message, isError = false, ms = 2600) {
   const el = document.getElementById('toast');
   el.textContent = message;
   el.classList.toggle('error', isError);
   el.classList.add('show');
   clearTimeout(el.timer);
-  el.timer = setTimeout(() => el.classList.remove('show'), 2600);
+  el.timer = setTimeout(() => el.classList.remove('show'), ms);
 }
 
 // "School/RIRS.md" -> "RIRS"
 function noteName(path) {
   return path.split('/').pop().replace(/\.md$/, '');
+}
+
+// "School/RIRS.md" -> "School", "Inbox.md" -> ""
+function noteFolder(path) {
+  return path.split('/').slice(0, -1).join('/');
 }
 
 // Date as YYYY-MM-DD in local time
@@ -53,12 +58,18 @@ let saveTimer = null;
 let dirty = false;
 let calendar = null;
 let currentView = 'notes';
+let selected = new Set();   // notes ticked in the sidebar (Ctrl/Shift+click)
+let anchorPath = null;      // where a Shift+click range starts
 
 // ================= Notes list =================
 
 async function loadNotes() {
   notes = await api('/api/notes');
+  for (const path of Array.from(selected)) {
+    if (!notes.some((n) => n.path === path)) selected.delete(path);
+  }
   renderNoteList(notes);
+  updateSelectBar();
 }
 
 // Groups notes by folder and draws them in the sidebar
@@ -87,8 +98,9 @@ function renderNoteList(list, snippets = {}) {
       const li = document.createElement('li');
       const btn = document.createElement('button');
       btn.textContent = noteName(note.path);
-      btn.className = note.path === currentPath ? 'note-link current' : 'note-link';
-      btn.addEventListener('click', () => openNote(note.path));
+      btn.dataset.path = note.path;
+      btn.className = 'note-link' + (note.path === currentPath ? ' current' : '') + (selected.has(note.path) ? ' selected' : '');
+      btn.addEventListener('click', (e) => onNoteClick(e, note.path));
       li.appendChild(btn);
 
       if (snippets[note.path]) {
@@ -125,6 +137,8 @@ const editor = new EasyMDE({
   element: document.getElementById('editor'),
   spellChecker: false,
   status: false,
+  tabSize: 4,              // nested lists are indented with 4 spaces
+  indentWithTabs: false,
   autoDownloadFontAwesome: false, // icons are served locally from /vendor/font-awesome
   placeholder: 'Start writing. Add a task with  - [ ] something 📅 2026-11-20',
   // Grouped: text style | lists and tasks | insert | view
@@ -140,15 +154,116 @@ const editor = new EasyMDE({
     const withLinks = text.replace(/\[\[([^\]]+)\]\]/g, (match, name) => {
       return '<a href="#" class="wikilink" data-note="' + name.replace(/"/g, '') + '">' + name + '</a>';
     });
-    return editor.markdown(withLinks);
+    return fixImagePaths(editor.markdown(withLinks));
   },
 });
+
+// Images: ![](pic.png) or ![](Folder/my%20pic.png) are relative to the folder of the open note.
+// They are served by the backend at /files/<path>.
+function fixImagePaths(html) {
+  const box = document.createElement('template');   // a template does not load images
+  box.innerHTML = html;
+  const base = currentPath ? noteFolder(currentPath).split('/').filter(Boolean) : [];
+
+  box.content.querySelectorAll('img').forEach((img) => {
+    const src = img.getAttribute('src') || '';
+    if (/^([a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(src)) return;   // http:, data:, /absolute
+
+    let decoded = src.split('#')[0].split('?')[0];
+    try { decoded = decodeURIComponent(decoded); } catch (err) { /* keep it as it is */ }
+
+    const parts = base.slice();
+    for (const part of decoded.split('/')) {
+      if (part === '' || part === '.') continue;
+      if (part === '..') parts.pop();
+      else parts.push(part);
+    }
+    img.setAttribute('src', '/files/' + parts.map(encodeURIComponent).join('/'));
+    img.setAttribute('loading', 'lazy');
+  });
+  return box.innerHTML;
+}
 
 function insertTask() {
   const cm = editor.codemirror;
   cm.replaceSelection('- [ ] ');
   cm.focus();
 }
+
+// ---------- Numbered lists: Tab, Shift+Tab and Enter (see lists.js) ----------
+
+// Writes the result of a list operation back into the editor
+function applyListResult(cm, result) {
+  cm.operation(() => {
+    if (result.lines.length !== result.count) {
+      // A line was added or removed (Enter): replace the whole block
+      const lastLine = result.first + result.count - 1;
+      cm.replaceRange(result.lines.join('\n'), { line: result.first, ch: 0 }, { line: lastLine, ch: cm.getLine(lastLine).length });
+      return;
+    }
+    // Same number of lines (Tab, Shift+Tab): only touch the lines that changed
+    result.lines.forEach((text, k) => {
+      const lineNo = result.first + k;
+      const old = cm.getLine(lineNo);
+      if (old !== text) cm.replaceRange(text, { line: lineNo, ch: 0 }, { line: lineNo, ch: old.length });
+    });
+  });
+}
+
+// Line numbers touched by the selection(s)
+function selectedRows(cm) {
+  const rows = new Set();
+  for (const sel of cm.listSelections()) {
+    const from = sel.from();
+    const to = sel.to();
+    const last = to.ch === 0 && to.line > from.line ? to.line - 1 : to.line;
+    for (let i = from.line; i <= last; i++) rows.add(i);
+  }
+  return Array.from(rows);
+}
+
+function onTab(cm, direction) {
+  const rows = selectedRows(cm);
+  const lines = cm.getValue().split('\n');
+  // Bullets, tasks and plain text keep the normal behaviour
+  if (!rows.some((r) => ListTools.isNumbered(lines[r]))) {
+    cm.execCommand(direction > 0 ? 'tabAndIndentMarkdownList' : 'shiftTabAndUnindentMarkdownList');
+    return;
+  }
+
+  const result = ListTools.shift(lines, rows, direction);
+  if (!result) return;   // e.g. Tab on the first item: nothing to nest under
+  const oldLengths = result.lines.map((_, k) => lines[result.first + k].length);
+  const sels = cm.listSelections();
+  applyListResult(cm, result);
+
+  // Keep the cursor on the same text even though the line got longer or shorter
+  const moved = (pos) => {
+    const k = pos.line - result.first;
+    if (k < 0 || k >= result.lines.length) return pos;
+    return { line: pos.line, ch: Math.max(0, pos.ch + result.lines[k].length - oldLengths[k]) };
+  };
+  cm.setSelections(sels.map((s) => ({ anchor: moved(s.anchor), head: moved(s.head) })));
+}
+
+function onEnter(cm) {
+  if (!cm.somethingSelected()) {
+    const cursor = cm.getCursor();
+    const result = ListTools.enter(cm.getValue().split('\n'), cursor.line, cursor.ch);
+    if (result) {
+      applyListResult(cm, result);
+      cm.setCursor(result.cursor);
+      return;
+    }
+  }
+  cm.execCommand('newlineAndIndentContinueMarkdownList');
+}
+
+editor.codemirror.setOption('extraKeys', Object.assign({}, editor.codemirror.getOption('extraKeys'), {
+  'Tab': (cm) => onTab(cm, 1),
+  'Shift-Tab': (cm) => onTab(cm, -1),
+  'Enter': onEnter,
+}));
 
 editor.codemirror.on('change', (cm, change) => {
   if (change.origin === 'setValue') return; // loading a note is not an edit
@@ -291,6 +406,282 @@ document.getElementById('delete-note').addEventListener('click', async () => {
     toast(err.message, true);
   }
 });
+
+// ================= Selecting several notes =================
+
+// Paths in the order the sidebar shows them (notes inside closed folders are skipped)
+function visiblePaths() {
+  return Array.from(document.querySelectorAll('#note-list .note-link'))
+    .filter((btn) => btn.offsetParent !== null)
+    .map((btn) => btn.dataset.path);
+}
+
+function onNoteClick(e, path) {
+  const toggle = e.ctrlKey || e.metaKey;
+
+  if (e.shiftKey) {
+    // Range from the last clicked note (or the open note) to this one
+    const order = visiblePaths();
+    const from = order.indexOf(anchorPath || currentPath);
+    const to = order.indexOf(path);
+    const start = from === -1 ? to : Math.min(from, to);
+    const end = from === -1 ? to : Math.max(from, to);
+    if (!toggle) selected.clear();
+    for (let i = start; i <= end; i++) selected.add(order[i]);
+  } else if (toggle) {
+    if (selected.has(path)) selected.delete(path);
+    else selected.add(path);
+    anchorPath = path;
+  } else {
+    // Plain click: open the note and forget the selection
+    selected.clear();
+    anchorPath = path;
+    updateSelectBar();
+    openNote(path);
+    return;
+  }
+  updateSelectBar();
+}
+
+function clearSelection() {
+  selected.clear();
+  anchorPath = null;
+  updateSelectBar();
+}
+
+// Marks selected notes and shows the action bar when 2 or more are selected
+function updateSelectBar() {
+  document.querySelectorAll('#note-list .note-link').forEach((btn) => {
+    btn.classList.toggle('selected', selected.has(btn.dataset.path));
+  });
+  const bar = document.getElementById('select-bar');
+  bar.hidden = selected.size < 2;
+  document.getElementById('select-count').textContent = selected.size + ' selected';
+}
+
+// After a move or delete: reload the list and forget the selection
+async function afterBulkChange() {
+  clearSelection();
+  await loadNotes();
+  loadItems().catch(() => {});   // task paths changed too
+}
+
+document.getElementById('select-clear').addEventListener('click', clearSelection);
+
+// ---------- Delete ----------
+
+document.getElementById('select-delete').addEventListener('click', async () => {
+  const paths = Array.from(selected);
+  if (paths.length < 2) return;
+  if (!confirm('Delete ' + paths.length + ' notes? This cannot be undone.')) return;
+
+  try {
+    await saveNote();   // do not lose edits of the open note
+    const result = await api('/api/notes/delete', { method: 'POST', body: { paths: paths } });
+
+    if (currentPath && result.deleted.includes(currentPath)) {
+      currentPath = null;
+      dirty = false;
+      localStorage.removeItem('lastNote');
+      showNoteEditor(false);
+    }
+    await afterBulkChange();
+
+    if (result.failed.length) {
+      toast('Deleted ' + result.deleted.length + ', ' + result.failed.length + ' failed: '
+        + result.failed.map((f) => noteName(f.path) + ' (' + f.error + ')').join(', '), true, 8000);
+    } else {
+      toast('Deleted ' + result.deleted.length + ' notes');
+    }
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+// ---------- Move ----------
+
+const moveDialog = document.getElementById('move-dialog');
+const moveSelect = document.getElementById('move-folder');
+const moveNew = document.getElementById('move-new');
+
+// Every folder that exists, including the parents of nested ones ("A/B" gives "A" and "A/B")
+function allFolders() {
+  const folders = new Set();
+  for (const note of notes) {
+    const parts = noteFolder(note.path).split('/').filter(Boolean);
+    for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join('/'));
+  }
+  return Array.from(folders).sort((a, b) => a.localeCompare(b));
+}
+
+function addOption(select, value, label) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = label;
+  select.appendChild(option);
+}
+
+document.getElementById('select-move').addEventListener('click', () => {
+  moveSelect.innerHTML = '';
+  addOption(moveSelect, '', 'Top level (no folder)');
+  for (const folder of allFolders()) addOption(moveSelect, 'f:' + folder, folder);
+  addOption(moveSelect, '__new__', 'New folder…');
+
+  document.getElementById('move-title').textContent = 'Move ' + selected.size + ' notes';
+  document.getElementById('move-new-wrap').hidden = true;
+  moveNew.value = '';
+  moveDialog.showModal();
+  moveSelect.focus();
+});
+
+moveSelect.addEventListener('change', () => {
+  const isNew = moveSelect.value === '__new__';
+  document.getElementById('move-new-wrap').hidden = !isNew;
+  if (isNew) moveNew.focus();
+});
+
+document.getElementById('move-cancel').addEventListener('click', () => moveDialog.close());
+
+document.getElementById('move-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  let folder = moveSelect.value.startsWith('f:') ? moveSelect.value.slice(2) : '';
+  if (moveSelect.value === '__new__') {
+    folder = moveNew.value.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!folder) {
+      toast('Type a name for the new folder', true);
+      moveNew.focus();
+      return;
+    }
+  }
+
+  const paths = Array.from(selected);
+  try {
+    await saveNote();
+    const result = await api('/api/notes/move', { method: 'POST', body: { paths: paths, folder: folder } });
+    moveDialog.close();
+
+    // The open note stays open, at its new path
+    for (const m of result.moved) {
+      if (m.from === currentPath) {
+        currentPath = m.to;
+        localStorage.setItem('lastNote', m.to);
+        document.getElementById('note-title').value = m.to.replace(/\.md$/, '');
+      }
+    }
+    await afterBulkChange();
+
+    const where = folder || 'the top level';
+    if (result.failed.length) {
+      toast('Moved ' + result.moved.length + ' to ' + where + '. Not moved: '
+        + result.failed.map((f) => noteName(f.path) + ' (' + f.error + ')').join(', '), true, 8000);
+    } else {
+      toast('Moved ' + result.moved.length + ' notes to ' + where);
+    }
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
+
+// ================= Sidebar: hide and resize =================
+
+const rootEl = document.documentElement;
+const sidebar = document.getElementById('sidebar');
+const resizer = document.getElementById('sidebar-resizer');
+const desktop = window.matchMedia('(min-width: 801px)');
+const DEFAULT_WIDTH = 264;
+const MIN_WIDTH = 200;
+const MAX_WIDTH = 480;
+
+function remember(key, value) {
+  try { localStorage.setItem(key, value); } catch (err) { /* not important */ }
+}
+
+// The editor and calendar measure their size, so tell them when the space changes
+function refreshLayout() {
+  editor.codemirror.refresh();
+  if (calendar) calendar.updateSize();
+}
+
+function setSidebarWidth(px, save = true) {
+  px = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.round(px)));
+  rootEl.style.setProperty('--sidebar-w', px + 'px');
+  resizer.setAttribute('aria-valuenow', px);
+  if (save) remember('sidebarWidth', px);
+  refreshLayout();
+}
+
+function isCollapsed() {
+  return rootEl.classList.contains('sidebar-collapsed');
+}
+
+// A hidden sidebar must not be reachable with Tab (only on desktop; on a phone it is the drawer)
+function syncSidebarInert() {
+  sidebar.inert = isCollapsed() && desktop.matches;
+}
+
+function setSidebarCollapsed(collapsed) {
+  rootEl.classList.add('sidebar-animating');     // animation only for hide and show, not for dragging
+  rootEl.classList.toggle('sidebar-collapsed', collapsed);
+  syncSidebarInert();
+  remember('sidebarCollapsed', collapsed ? '1' : '0');
+  refreshLayout();
+  setTimeout(() => {
+    rootEl.classList.remove('sidebar-animating');
+    refreshLayout();
+  }, 240);
+}
+
+document.getElementById('collapse-sidebar').addEventListener('click', () => {
+  setSidebarCollapsed(true);
+  document.getElementById('expand-sidebar').focus();
+});
+document.getElementById('expand-sidebar').addEventListener('click', () => {
+  setSidebarCollapsed(false);
+  document.getElementById('collapse-sidebar').focus();
+});
+
+// Ctrl+\ (Cmd+\ on a Mac)
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
+    e.preventDefault();
+    if (desktop.matches) setSidebarCollapsed(!isCollapsed());
+  }
+});
+
+// Drag the right edge
+resizer.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  rootEl.classList.remove('sidebar-animating');
+  resizer.setPointerCapture(e.pointerId);
+  document.body.classList.add('resizing');
+});
+resizer.addEventListener('pointermove', (e) => {
+  if (!resizer.hasPointerCapture(e.pointerId)) return;
+  setSidebarWidth(e.clientX, false);
+});
+resizer.addEventListener('pointerup', (e) => {
+  resizer.releasePointerCapture(e.pointerId);
+  document.body.classList.remove('resizing');
+  setSidebarWidth(e.clientX);   // this one is saved
+});
+resizer.addEventListener('dblclick', () => setSidebarWidth(DEFAULT_WIDTH));
+
+// Arrow keys when the edge has focus (Shift = bigger steps)
+resizer.addEventListener('keydown', (e) => {
+  const current = sidebar.getBoundingClientRect().width;
+  const step = e.shiftKey ? 48 : 16;
+  if (e.key === 'ArrowLeft') setSidebarWidth(current - step);
+  else if (e.key === 'ArrowRight') setSidebarWidth(current + step);
+  else if (e.key === 'Home') setSidebarWidth(MIN_WIDTH);
+  else if (e.key === 'End') setSidebarWidth(MAX_WIDTH);
+  else return;
+  e.preventDefault();
+});
+
+desktop.addEventListener('change', syncSidebarInert);
+syncSidebarInert();
+resizer.setAttribute('aria-valuenow', Math.round(sidebar.getBoundingClientRect().width));
 
 // ================= Search =================
 
@@ -633,7 +1024,9 @@ document.getElementById('scrim').addEventListener('click', () => {
   document.body.classList.remove('menu-open');
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') document.body.classList.remove('menu-open');
+  if (e.key !== 'Escape') return;
+  document.body.classList.remove('menu-open');
+  if (selected.size && !document.querySelector('dialog[open]')) clearSelection();
 });
 
 // Save before closing the tab

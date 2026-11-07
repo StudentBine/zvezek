@@ -4,8 +4,9 @@
 //   - [x] Hand in report due:2026-11-10   -> task (done)
 //   - Dentist 📅 2026-11-14 09:30         -> event (a list item with a date but no checkbox)
 //   - [ ] Read chapter 3                  -> task without a date (shows only in the Tasks view)
+//   1. [ ] Hand in report 📅 2026-11-20  -> numbered task (works like "- [ ]", the number stays)
 
-const TASK_REGEX = /^(\s*)[-*] \[( |x|X)\] (.*)$/;
+const TASK_REGEX = /^(\s*)(?:[-*]|\d+[.)]) \[( |x|X)\] (.*)$/;
 const LIST_REGEX = /^(\s*)[-*] (.*)$/;
 const DATE_REGEX = /(?:📅|due:)\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/;
 

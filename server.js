@@ -1,5 +1,6 @@
 const express = require('express');
 const fs = require('fs/promises');
+const { constants: fsConstants } = require('fs');
 const path = require('path');
 const { parseFile, setDone, setDate } = require('./parser');
 
@@ -35,9 +36,44 @@ app.use('/vendor/font-awesome', express.static(path.join(__dirname, 'node_module
 app.use('/vendor/fonts/bricolage', express.static(path.join(__dirname, 'node_modules/@fontsource/bricolage-grotesque')));
 app.use('/vendor/fonts/literata', express.static(path.join(__dirname, 'node_modules/@fontsource/literata')));
 
+// ---------- Other files (images in notes) ----------
+// /files/School/pic.png is DATA_DIR/School/pic.png. Notes (.md), hidden files and
+// anything outside DATA_DIR are not served.
+app.get('/files/*filePath', (req, res) => {
+  const parts = req.params.filePath;
+  try {
+    if (parts.some((part) => part === '' || part === '.' || part === '..' || part.startsWith('.'))) {
+      throw new Error('Not allowed');
+    }
+    const rel = parts.join('/');
+    if (rel.toLowerCase().endsWith('.md')) throw new Error('Not allowed');
+    const full = safeFile(rel);
+    // "sandbox" stops scripts in an SVG from running if someone opens the file directly
+    res.set('Content-Security-Policy', 'sandbox');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.sendFile(full, { dotfiles: 'deny' }, (err) => {
+      if (err && !res.headersSent) res.status(404).send('Not found');
+    });
+  } catch (err) {
+    res.status(404).send('Not found');
+  }
+});
+
 // ---------- Helpers ----------
 
-// Turns "School/RIRS.md" into a full path and makes sure it stays inside DATA_DIR
+// Turns a relative path into a full path and makes sure it stays inside DATA_DIR
+function safeFile(relPath) {
+  if (!relPath || typeof relPath !== 'string' || relPath.includes('\0')) {
+    throw new Error('Missing path');
+  }
+  const full = path.resolve(DATA_DIR, relPath);
+  if (!full.startsWith(DATA_DIR + path.sep)) {
+    throw new Error('Path is outside the notes folder');
+  }
+  return full;
+}
+
+// Same for notes: "School/RIRS" becomes ".../School/RIRS.md"
 function safePath(relPath) {
   if (!relPath || typeof relPath !== 'string') {
     throw new Error('Missing path');
@@ -45,11 +81,7 @@ function safePath(relPath) {
   if (!relPath.endsWith('.md')) {
     relPath = relPath + '.md';
   }
-  const full = path.resolve(DATA_DIR, relPath);
-  if (!full.startsWith(DATA_DIR + path.sep)) {
-    throw new Error('Path is outside the notes folder');
-  }
-  return full;
+  return safeFile(relPath);
 }
 
 // Lists every .md file in DATA_DIR (including subfolders)
@@ -130,6 +162,60 @@ app.post('/api/rename', handle(async (req, res) => {
   await fs.mkdir(path.dirname(to), { recursive: true });
   await fs.rename(from, to);
   res.json({ ok: true });
+}));
+
+// Move several notes into one folder ("" = top level).
+// Never overwrites: a note whose name already exists there is reported in "failed".
+app.post('/api/notes/move', handle(async (req, res) => {
+  const paths = req.body.paths;
+  const folder = (req.body.folder || '').trim().replace(/^\/+|\/+$/g, '');
+  if (!Array.isArray(paths) || paths.length === 0) throw new Error('No notes selected');
+  if (typeof req.body.folder !== 'string' && req.body.folder !== undefined) throw new Error('Folder must be text');
+  if (folder.split('/').some((part) => part === '..' || part.startsWith('.'))) throw new Error('Invalid folder name');
+
+  const moved = [];
+  const failed = [];
+  for (const rel of paths) {
+    try {
+      const from = safePath(rel);
+      const to = safePath(folder ? folder + '/' + path.basename(from) : path.basename(from));
+      if (from === to) throw new Error('already in that folder');
+
+      await fs.mkdir(path.dirname(to), { recursive: true });
+      // COPYFILE_EXCL makes this fail instead of overwriting an existing note
+      await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL).catch((err) => {
+        if (err.code === 'EEXIST') throw new Error('already exists in ' + (folder || 'the top level'));
+        throw err;
+      });
+      await fs.unlink(from);
+      if (path.dirname(from) !== DATA_DIR) {
+        await fs.rmdir(path.dirname(from)).catch(() => {});   // remove the old folder if it is now empty
+      }
+      moved.push({ from: path.relative(DATA_DIR, from).split(path.sep).join('/'), to: path.relative(DATA_DIR, to).split(path.sep).join('/') });
+    } catch (err) {
+      failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
+    }
+  }
+  res.json({ moved: moved, failed: failed });
+}));
+
+// Delete several notes at once
+app.post('/api/notes/delete', handle(async (req, res) => {
+  const paths = req.body.paths;
+  if (!Array.isArray(paths) || paths.length === 0) throw new Error('No notes selected');
+
+  const deleted = [];
+  const failed = [];
+  for (const rel of paths) {
+    try {
+      const full = safePath(rel);
+      await fs.unlink(full);
+      deleted.push(path.relative(DATA_DIR, full).split(path.sep).join('/'));
+    } catch (err) {
+      failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
+    }
+  }
+  res.json({ deleted: deleted, failed: failed });
 }));
 
 app.get('/api/search', handle(async (req, res) => {
