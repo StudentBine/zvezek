@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zvezek</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/fonts/bricolage/400.css">
+  <link rel="stylesheet" href="/vendor/fonts/bricolage/600.css">
+  <link rel="stylesheet" href="/vendor/fonts/bricolage/700.css">
+  <link rel="stylesheet" href="/vendor/fonts/literata/400.css">
+  <link rel="stylesheet" href="/vendor/fonts/literata/600.css">
+  <link rel="stylesheet" href="/vendor/fonts/literata/400-italic.css">
+  <link rel="stylesheet" href="/vendor/font-awesome/css/font-awesome.min.css">
+  <link rel="stylesheet" href="/vendor/easymde/easymde.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 26 L12 11 L17 18 L21 13 L29 26 Z"/><circle cx="24" cy="7" r="3"/></svg>
+      <span>Zvezek</span>
+    </div>
+
+    <nav class="views">
+      <button data-view="notes" class="active">Notes</button>
+      <button data-view="calendar">Calendar</button>
+      <button data-view="tasks">Tasks</button>
+    </nav>
+
+    <input id="search" type="search" placeholder="Search notes" autocomplete="off">
+
+    <div class="sidebar-head">
+      <span>Your notes</span>
+      <button id="new-note" title="New note" aria-label="New note">+</button>
+    </div>
+    <div id="note-list"></div>
+  </aside>
+
+  <main>
+    <button id="menu-toggle" aria-label="Show notes list">☰</button>
+
+    <!-- Notes view -->
+    <section id="view-notes" class="view active">
+      <header class="view-head">
+        <input id="note-title" aria-label="Note name" spellcheck="false">
+        <span id="save-state"></span>
+        <button id="delete-note" class="quiet">Delete</button>
+      </header>
+      <div class="editor-wrap">
+        <textarea id="editor"></textarea>
+      </div>
+      <div id="empty-notes" class="empty" hidden>
+        <p>No note is open. Pick one from the list, or create a new one with +.</p>
+      </div>
+    </section>
+
+    <!-- Calendar view -->
+    <section id="view-calendar" class="view">
+      <header class="view-head">
+        <h1>Calendar</h1>
+        <button class="primary" data-add>Add task</button>
+      </header>
+      <div id="calendar"></div>
+    </section>
+
+    <!-- Tasks view -->
+    <section id="view-tasks" class="view">
+      <header class="view-head">
+        <h1>Tasks</h1>
+        <button class="primary" data-add>Add task</button>
+      </header>
+      <div id="task-groups"></div>
+    </section>
+  </main>
+
+  <!-- Quick add dialog -->
+  <dialog id="add-dialog">
+    <form id="add-form" method="dialog">
+      <h2>Add to Inbox</h2>
+      <label>What
+        <input name="text" required autocomplete="off" placeholder="Hand in Docker naloga">
+      </label>
+      <div class="type-switch">
+        <label><input type="radio" name="type" value="task" checked> Task</label>
+        <label><input type="radio" name="type" value="event"> Event</label>
+      </div>
+      <div class="row">
+        <label>Date <input type="date" name="date"></label>
+        <label>Time <input type="time" name="time"></label>
+      </div>
+      <div class="actions">
+        <button type="button" class="quiet" id="add-cancel">Cancel</button>
+        <button type="submit" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status"></div>
+
+  <script src="/vendor/easymde/easymde.min.js"></script>
+  <script src="/vendor/fullcalendar/index.global.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

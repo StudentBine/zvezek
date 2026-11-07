@@ -1,0 +1,42 @@
+# On every push to main:
+#   1. build the Docker image and push it to ghcr.io/studentbine/zvezek:latest
+#   2. move the "deploy" branch to the same commit
+#
+# Portainer watches the "deploy" branch, not "main". That way Portainer only
+# redeploys after the new image actually exists (otherwise it could pull the old one).
+
+name: Build and publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/studentbine/zvezek:latest
+            ghcr.io/studentbine/zvezek:${{ github.sha }}
+
+      - name: Update deploy branch
+        run: git push --force origin HEAD:deploy

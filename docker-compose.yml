@@ -1,0 +1,23 @@
+services:
+  zvezek:
+    image: ghcr.io/studentbine/zvezek:latest
+    container_name: zvezek
+    restart: unless-stopped
+    # Same user/group as the rest of the homelab, so the files on disk belong to you
+    user: "1001:100"
+    environment:
+      - TZ=Europe/Ljubljana
+      # Optional login prompt. Leave empty if NPM / Authelia already protects the app.
+      - APP_USER=${APP_USER:-admin}
+      - APP_PASSWORD=${APP_PASSWORD:-}
+    volumes:
+      # Your notes as plain .md files. Change the left side if you keep appdata elsewhere.
+      - ${NOTES_DIR:-/opt/appdata/zvezek}:/data
+    ports:
+      - "3010:3000"   # for testing directly at http://server-ip:3010 (remove once NPM works)
+    networks:
+      - media
+
+networks:
+  media:
+    external: true
