@@ -329,6 +329,22 @@ async function openNote(path) {
   }
 }
 
+// The server may rewrite a note when it moves (image links), so load the file again.
+// Without this, the next autosave would write the old text back.
+async function reloadOpenNote() {
+  if (!currentPath) return;
+  try {
+    const data = await api('/api/note?path=' + encodeURIComponent(currentPath));
+    if (data.content === editor.value()) return;
+    const inPreview = editor.isPreviewActive();
+    if (inPreview) editor.togglePreview();
+    editor.value(data.content);
+    if (inPreview) editor.togglePreview();   // draw the preview again with the new text
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
 function showNoteEditor(show) {
   document.querySelector('#view-notes .view-head').hidden = !show;
   document.querySelector('.editor-wrap').hidden = !show;
@@ -384,6 +400,7 @@ titleInput.addEventListener('blur', async () => {
     currentPath = newPath;
     localStorage.setItem('lastNote', newPath);
     await loadNotes();
+    await reloadOpenNote();
     toast('Renamed');
   } catch (err) {
     titleInput.value = currentPath.replace(/\.md$/, '');
@@ -570,6 +587,7 @@ document.getElementById('move-form').addEventListener('submit', async (e) => {
       }
     }
     await afterBulkChange();
+    await reloadOpenNote();
 
     const where = folder || 'the top level';
     if (result.failed.length) {

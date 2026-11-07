@@ -1,8 +1,8 @@
 const express = require('express');
 const fs = require('fs/promises');
-const { constants: fsConstants } = require('fs');
 const path = require('path');
 const { parseFile, setDone, setDate } = require('./parser');
+const { rewriteImageLinks } = require('./links');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
@@ -109,13 +109,68 @@ async function writeNote(full, content) {
   await fs.writeFile(full, content, 'utf8');
 }
 
+function relPath(full) {
+  return path.relative(DATA_DIR, full).split(path.sep).join('/');
+}
+
+function conflictError(rel) {
+  const err = new Error('A note named "' + rel.replace(/\.md$/, '') + '" already exists');
+  err.status = 409;
+  return err;
+}
+
+// Moves or renames one note. Never overwrites an existing note.
+// When the folder changes, relative image links inside the note are rewritten so they
+// still point at the same files (the image files are not moved).
+async function moveNote(fromRel, toRel) {
+  const from = safePath(fromRel);
+  const to = safePath(toRel);
+  if (from === to) return;
+
+  const fromInfo = await fs.stat(from);                       // missing note: ENOENT -> 404
+  const toInfo = await fs.stat(to).catch(() => null);
+
+  if (toInfo) {
+    // On a case-insensitive file system "rirs.md" and "RIRS.md" are the same file.
+    // Then this is only a change of letters, not a conflict.
+    const sameFile = toInfo.ino === fromInfo.ino && toInfo.dev === fromInfo.dev;
+    if (!sameFile) throw conflictError(relPath(to));
+    // A direct rename does nothing there (same file), so go through a temporary hidden name
+    const temp = path.join(path.dirname(from), '.zvezek-rename-' + Date.now());
+    await fs.rename(from, temp);
+    await fs.rename(temp, to).catch(async (err) => {
+      await fs.rename(temp, from).catch(() => {});             // put it back
+      throw err;
+    });
+    await fs.unlink(temp).catch(() => {});                       // only exists if the second rename did nothing
+    return;
+  }
+
+  const content = await fs.readFile(from, 'utf8');
+  const fixed = rewriteImageLinks(content, path.posix.dirname(relPath(from)).replace(/^\.$/, ''), path.posix.dirname(relPath(to)).replace(/^\.$/, ''));
+  await fs.mkdir(path.dirname(to), { recursive: true });
+  // flag "wx" fails if the file appeared in the meantime, so nothing is ever overwritten
+  await fs.writeFile(to, fixed, { encoding: 'utf8', flag: 'wx' }).catch((err) => {
+    if (err.code === 'EEXIST') throw conflictError(relPath(to));
+    throw err;
+  });
+  await fs.unlink(from);
+  // Remove the old folder (and its parents) if they are now empty
+  let dir = path.dirname(from);
+  while (dir !== DATA_DIR && dir.startsWith(DATA_DIR + path.sep)) {
+    const removed = await fs.rmdir(dir).then(() => true).catch(() => false);
+    if (!removed) break;
+    dir = path.dirname(dir);
+  }
+}
+
 // Wraps a route so errors become a JSON response instead of crashing
 function handle(fn) {
   return async (req, res) => {
     try {
       await fn(req, res);
     } catch (err) {
-      const status = err.code === 'ENOENT' ? 404 : 400;
+      const status = err.status || (err.code === 'ENOENT' ? 404 : 400);
       res.status(status).json({ error: err.code === 'ENOENT' ? 'Note not found' : err.message });
     }
   };
@@ -157,10 +212,7 @@ app.delete('/api/note', handle(async (req, res) => {
 }));
 
 app.post('/api/rename', handle(async (req, res) => {
-  const from = safePath(req.body.from);
-  const to = safePath(req.body.to);
-  await fs.mkdir(path.dirname(to), { recursive: true });
-  await fs.rename(from, to);
+  await moveNote(req.body.from, req.body.to);
   res.json({ ok: true });
 }));
 
@@ -180,18 +232,8 @@ app.post('/api/notes/move', handle(async (req, res) => {
       const from = safePath(rel);
       const to = safePath(folder ? folder + '/' + path.basename(from) : path.basename(from));
       if (from === to) throw new Error('already in that folder');
-
-      await fs.mkdir(path.dirname(to), { recursive: true });
-      // COPYFILE_EXCL makes this fail instead of overwriting an existing note
-      await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL).catch((err) => {
-        if (err.code === 'EEXIST') throw new Error('already exists in ' + (folder || 'the top level'));
-        throw err;
-      });
-      await fs.unlink(from);
-      if (path.dirname(from) !== DATA_DIR) {
-        await fs.rmdir(path.dirname(from)).catch(() => {});   // remove the old folder if it is now empty
-      }
-      moved.push({ from: path.relative(DATA_DIR, from).split(path.sep).join('/'), to: path.relative(DATA_DIR, to).split(path.sep).join('/') });
+      await moveNote(relPath(from), relPath(to));
+      moved.push({ from: relPath(from), to: relPath(to) });
     } catch (err) {
       failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
     }

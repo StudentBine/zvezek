@@ -43,7 +43,9 @@ nesting by 4 spaces); the preview shows them as `1.` / `1.1.` / `1.1.1.`.
 
 Files other than `.md` in the notes folder are served at `/files/<path>` (with the same login as the rest of the app).
 In the preview, `![](img.png)` and `![](Folder/my%20image.png)` are relative to the folder of the open note,
-so a Trilium Markdown export works as it is. Moving a note does not move its images.
+so a Trilium Markdown export works as it is.
+
+Renaming or moving a note to another folder rewrites its relative image links (`![](pics/a.png)`, `<img src="…">`) so they still point at the same files. The image files are not moved, and absolute URLs, `/files/` links and code blocks are left alone. A rename or move never overwrites an existing note: you get a "already exists" message instead.
 
 ## Deploy with Portainer (auto-updates)
 
@@ -120,6 +122,7 @@ or run `git init` inside it and commit from a cron job to get history.
 | --- | --- |
 | `server.js` | Express server: notes API (including move/delete of several notes), task/event API, `/files`, serves the frontend |
 | `parser.js` | Finds tasks and events in markdown and edits those lines |
+| `links.js` | Rewrites relative image links when a note moves to another folder |
 | `public/` | Frontend: `index.html`, `app.js`, `style.css`, `lists.js` (numbered-list logic) |
 | `Dockerfile`, `docker-compose.yml` | Container and Portainer stack |
 | `.github/workflows/build.yml` | Builds the image and updates the `deploy` branch |
