@@ -113,7 +113,9 @@ function renderNoteList(list, snippets = {}) {
   }
 
   if (list.length === 0) {
-    container.innerHTML = '<p class="sidebar-empty">Nothing found.</p>';
+    container.innerHTML = '<p class="sidebar-empty">'
+      + (document.getElementById('search').value.trim() ? 'No notes match your search.' : 'No notes yet. Use + to add one.')
+      + '</p>';
   }
 }
 
@@ -125,9 +127,14 @@ const editor = new EasyMDE({
   status: false,
   autoDownloadFontAwesome: false, // icons are served locally from /vendor/font-awesome
   placeholder: 'Start writing. Add a task with  - [ ] something 📅 2026-11-20',
-  toolbar: ['bold', 'italic', 'heading', '|', 'unordered-list', 'ordered-list',
+  // Grouped: text style | lists and tasks | insert | view
+  toolbar: [
+    'bold', 'italic', 'heading', '|',
+    'unordered-list', 'ordered-list',
     { name: 'task', action: insertTask, className: 'fa fa-check-square-o', title: 'Insert task' },
-    'link', 'code', '|', 'preview', 'side-by-side'],
+    '|', 'link', 'quote', 'code', '|',
+    'preview', 'side-by-side',
+  ],
   // Turn [[Note name]] into clickable links in the preview
   previewRender: (text) => {
     const withLinks = text.replace(/\[\[([^\]]+)\]\]/g, (match, name) => {
@@ -166,7 +173,9 @@ document.querySelector('.editor-wrap').addEventListener('click', async (e) => {
 });
 
 function setSaveState(text) {
-  document.getElementById('save-state').textContent = text;
+  const el = document.getElementById('save-state');
+  el.textContent = text;
+  el.dataset.state = text.toLowerCase().replace(' ', '-');
 }
 
 async function saveNote() {
@@ -222,7 +231,10 @@ async function createNote(path) {
   }
 }
 
-document.getElementById('new-note').addEventListener('click', async () => {
+document.getElementById('new-note').addEventListener('click', newNote);
+document.getElementById('empty-new').addEventListener('click', newNote);
+
+async function newNote() {
   // A folder can be part of the name: "School/RIRS"
   let base = 'Untitled';
   let n = 1;
@@ -234,7 +246,7 @@ document.getElementById('new-note').addEventListener('click', async () => {
   const title = document.getElementById('note-title');
   title.focus();
   title.select();
-});
+}
 
 // Rename: edit the title field and press Enter (or click away)
 const titleInput = document.getElementById('note-title');
@@ -302,6 +314,17 @@ document.getElementById('search').addEventListener('input', (e) => {
 
 async function loadItems() {
   items = await api('/api/items');
+  updateOverdueBadge();
+}
+
+// Small marigold number next to "Tasks" when something is overdue
+function updateOverdueBadge() {
+  const today = isoDate(new Date());
+  const count = items.filter((i) => i.type === 'task' && !i.done && i.date && i.date < today).length;
+  const badge = document.getElementById('overdue-badge');
+  badge.textContent = count;
+  badge.hidden = count === 0;
+  badge.title = count + ' overdue';
 }
 
 async function updateItem(item, changes) {
@@ -471,7 +494,11 @@ function renderTasks() {
   }
 
   if (total === 0) {
-    container.innerHTML = '<p class="empty">No tasks yet. Write <code>- [ ] something</code> in any note, or use Add task.</p>';
+    container.innerHTML = '<div class="empty">'
+      + '<svg viewBox="0 0 64 40" aria-hidden="true"><path d="M2 38 20 10l10 15 8-10 24 23Z"/><circle cx="50" cy="8" r="4"/></svg>'
+      + '<h2>All clear</h2>'
+      + '<p>Write <code>- [ ] something</code> in any note and it shows up here.</p>'
+      + '</div>';
   }
 }
 
@@ -561,7 +588,12 @@ async function showView(name) {
   const leavingNotes = currentView === 'notes' && name !== 'notes';
   currentView = name;
 
-  document.querySelectorAll('.views button').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
+  document.querySelectorAll('[data-view]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.view === name);
+    if (b.dataset.view === name) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  });
+  document.body.dataset.view = name;
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   document.body.classList.remove('menu-open');
 
@@ -581,7 +613,7 @@ async function showView(name) {
   }
 }
 
-document.querySelectorAll('.views button').forEach((btn) => {
+document.querySelectorAll('button[data-view]').forEach((btn) => {
   btn.addEventListener('click', async () => {
     const view = btn.dataset.view;
     // Coming back to notes: reload the note in case a task was ticked elsewhere
@@ -596,6 +628,12 @@ document.querySelectorAll('.views button').forEach((btn) => {
 
 document.getElementById('menu-toggle').addEventListener('click', () => {
   document.body.classList.toggle('menu-open');
+});
+document.getElementById('scrim').addEventListener('click', () => {
+  document.body.classList.remove('menu-open');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.body.classList.remove('menu-open');
 });
 
 // Save before closing the tab
@@ -617,6 +655,8 @@ document.addEventListener('keydown', (e) => {
 // ================= Start =================
 
 async function start() {
+  document.body.dataset.view = 'notes';
+  loadItems().catch(() => {}); // only for the overdue badge
   await loadNotes();
   const last = localStorage.getItem('lastNote');
   const first = notes.find((n) => n.path === last) || notes[0];
