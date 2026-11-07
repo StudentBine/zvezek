@@ -16,10 +16,53 @@ Write them anywhere, in any note:
 
 `due:2026-11-10` works the same as `📅 2026-11-10`.
 
-- **Calendar:** click the circle to tick a task, click the text to open its note, drag to change the date (the `.md` file is updated), click an empty day to add something.
+- **Calendar:** click the circle to tick a task, click the text to open its note, drag to change the date (the `.md` file is updated), click an empty day to add something. The calendar has no scrollbars of its own: the month grows to show every item of a day (a day only gets "+N more" from 9 items), and the week shows 06:00 to 24:00 (earlier items extend the range).
 - **Tasks:** grouped into Overdue, Today, Next 7 days, Later, No date and Done.
 - **Notes:** autosave, folders (name a note `School/RIRS` to put it in a folder), search, `[[wiki links]]`.
 - Quick add puts new items into `Inbox.md`.
+
+## Repeating tasks and events
+
+Same syntax as the Obsidian Tasks plugin, so the notes stay compatible:
+
+```markdown
+- [ ] Water plants 🔁 every week 📅 2026-11-09
+- Gym 🔁 every monday, wednesday 📅 2026-11-09 18:00
+- Standup 🔁 every weekday until 2026-12-20 📅 2026-11-09 09:30
+```
+
+Rules: `every day`, `every N days`, `every week`, `every N weeks`, `every month`, `every N months`, `every year`,
+`every weekday`, and lists like `every monday, thursday` (also `every 2 weeks on friday`). An optional `until YYYY-MM-DD` ends the series.
+A rule that is not understood is left alone: the line stays a normal item and the text stays in the title.
+
+- **Events** show every occurrence in the visible calendar range. The line's own date is the first one.
+- **Tasks:** only the line itself is a real task. The next 3 occurrences are shown faded in the calendar. When you tick it, that line gets `[x]` and `✅ <today>`, and a new open line with the next date is inserted directly above it (the way Obsidian Tasks does it). The next date is counted from the due date, not from the day you tick. After the last date of an `until` series, no new line is added.
+- Faded copies cannot be clicked, ticked or dragged. Dragging the real item moves the whole series (its `📅` date).
+- Months: a date that does not exist in a month becomes the last day of it (the 31st gives Feb 28, then Mar 31). Note that when a repeating *task* is ticked, the next date is calculated from the previous one, so a 31st can settle on the 28th.
+- The Add dialog has a *Repeat* select (none, every day, weekday, week, month, year).
+
+## Tabs
+
+Open notes are tabs above the editor. Clicking a note in the sidebar switches to its tab, or opens a new one.
+The × and a middle click close a tab, a dot on the tab means unsaved changes (notes are saved before you switch or close), and tabs can be dragged to change the order.
+Each tab remembers its cursor and scroll position, and the open tabs come back after a reload.
+Renaming or moving a note updates its tab, deleting it closes the tab.
+
+| Keys | |
+| --- | --- |
+| Alt+PageDown / Alt+PageUp | next / previous tab (Alt+Left/Right would clash with the editor and the browser's Back) |
+| Alt+W | close the tab (Ctrl+W and Ctrl+Tab belong to the browser) |
+
+## Preview
+
+- ` ```mermaid ` blocks are drawn as diagrams (flowcharts, sequence diagrams, ...) in the preview and in side-by-side mode, in a light or dark theme to match the app. A broken diagram shows a short error and its source. The library (`mermaid`, served from `node_modules` at `/vendor/mermaid`) is only loaded when a note has a diagram.
+- Tables (with `:---:` alignment) scroll sideways when they are wider than the page. `---` and `***` make a horizontal line. The editor toolbar has Table and Horizontal line buttons.
+
+## Files in the sidebar
+
+Every file in the notes folder is listed (hidden files and folders are skipped), not only `.md`. Other files get an icon (pdf, image, archive, other), muted text and their size on hover.
+A click opens `/files/<path>` in a new browser tab (PDFs and images are shown, zips download). They are never opened in the editor or searched for tasks.
+They work with multi-select (move, delete) and the search matches their file names.
 
 ## Numbered lists
 
@@ -121,8 +164,10 @@ or run `git init` inside it and commit from a cron job to get history.
 | File | What it does |
 | --- | --- |
 | `server.js` | Express server: notes API (including move/delete of several notes), task/event API, `/files`, serves the frontend |
-| `parser.js` | Finds tasks and events in markdown and edits those lines |
+| `parser.js` | Finds tasks and events in markdown, repeat rules, and edits those lines |
 | `links.js` | Rewrites relative image links when a note moves to another folder |
 | `public/` | Frontend: `index.html`, `app.js`, `style.css`, `lists.js` (numbered-list logic) |
+
+Repeat rules (`🔁`) are parsed in `parser.js`, no library needed. The only runtime libraries from npm are `express`, `easymde`, `fullcalendar`, `mermaid` and the font and icon packages.
 | `Dockerfile`, `docker-compose.yml` | Container and Portainer stack |
 | `.github/workflows/build.yml` | Builds the image and updates the `deploy` branch |

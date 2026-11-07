@@ -288,6 +288,29 @@ svg { display: block; }
 .note-link.selected { background: rgba(255, 255, 255, 0.16); color: #fff; box-shadow: inset 2px 0 0 #A9C7B6; }
 .note-link.selected.current { background: var(--pine); }
 
+/* Files that are not notes: pdf, images, archives ... Muted, with a small icon. Click opens a new browser tab. */
+.file-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: var(--side-dim);
+}
+
+.file-link svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.file-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-link:hover { background: rgba(255, 255, 255, 0.06); color: var(--side-text); }
+
 /* Action bar for several selected notes, pinned to the bottom of the sidebar */
 #select-bar {
   position: sticky;
@@ -560,6 +583,106 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 .empty p { margin: 0 0 18px; }
 .empty code { padding: 1px 5px; border-radius: 4px; background: var(--moss-soft); font-size: 0.9em; }
 
+/* ================= Tabs ================= */
+
+#tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  margin-bottom: -8px;
+  border-bottom: 1px solid var(--mist);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--mist) transparent;
+}
+
+#tabs[hidden] { display: none; }
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  max-width: 210px;
+  padding: 7px 6px 7px 14px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--radius-small) var(--radius-small) 0 0;
+  color: var(--stone);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tab:hover { background: var(--moss-soft); color: var(--granite); }
+
+.tab.active {
+  margin-bottom: -1px;             /* sits on top of the strip's bottom line */
+  padding-bottom: 8px;
+  border-color: var(--mist);
+  background: var(--paper);
+  color: var(--granite);
+  box-shadow: inset 0 2px 0 var(--pine);
+}
+
+@media (prefers-color-scheme: dark) {
+  .tab.active { box-shadow: inset 0 2px 0 var(--moss); }
+}
+
+.tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tab-close {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--stone);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.tab-close:hover { background: var(--mist); color: var(--granite); }
+.tab.active .tab-close, .tab:hover .tab-close, .tab:focus-within .tab-close { display: flex; }
+
+/* unsaved: a dot where the close button is; the close button comes back on hover */
+.tab-dot {
+  display: none;
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin: 0 6px 0 4px;
+  border-radius: 50%;
+  background: var(--moss);
+}
+
+.tab.unsaved .tab-dot { display: block; }
+.tab.unsaved .tab-close { display: none; }
+.tab.unsaved:hover .tab-close, .tab.unsaved:focus-within .tab-close { display: flex; }
+.tab.unsaved:hover .tab-dot, .tab.unsaved:focus-within .tab-dot { display: none; }
+
+.tab.dragging { opacity: 0.4; }
+
+.tab.drop-before::before,
+.tab.drop-after::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--focus);
+}
+
+.tab.drop-before::before { left: -2px; }
+.tab.drop-after::after { right: -2px; }
+
 /* ================= Editor (EasyMDE) ================= */
 
 .editor-wrap {
@@ -665,6 +788,7 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 .cm-s-easymde .cm-header { font-family: var(--ui); letter-spacing: -0.015em; color: var(--granite); }
 .cm-s-easymde .cm-link, .cm-s-easymde .cm-url { color: var(--moss); }
 .cm-s-easymde .cm-quote { color: var(--stone); }
+.cm-s-easymde .cm-hr { color: var(--stone); }
 .cm-s-easymde .cm-comment { background: var(--moss-soft); border-radius: 3px; color: var(--granite); }
 .cm-s-easymde .cm-formatting-task { color: var(--pine); font-weight: 600; }
 .CodeMirror .CodeMirror-placeholder { color: var(--stone); opacity: 0.8; }
@@ -718,6 +842,75 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 
 .editor-preview-side { border-color: var(--mist); }
 
+.editor-preview hr, .editor-preview-side hr {
+  height: 0;
+  margin: 2em 0;
+  border: 0;
+  border-top: 1px solid var(--mist);
+}
+
+/* Tables: a wide table scrolls sideways inside its own box */
+.editor-preview > .table-scroll, .editor-preview-side > .table-scroll {
+  width: fit-content;
+  max-width: 100%;
+  margin: 1.2em 0;
+  overflow-x: auto;
+  border: 1px solid var(--mist);
+  border-radius: var(--radius-small);
+}
+
+.editor-preview table, .editor-preview-side table {
+  border-collapse: collapse;
+  font-family: var(--ui);
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+
+.editor-preview th, .editor-preview td,
+.editor-preview-side th, .editor-preview-side td {
+  padding: 8px 14px;
+  border: 1px solid var(--mist);
+}
+
+/* first and last row/column share the box's border instead of doubling it */
+.editor-preview tr > :first-child, .editor-preview-side tr > :first-child { border-left: 0; }
+.editor-preview tr > :last-child, .editor-preview-side tr > :last-child { border-right: 0; }
+.editor-preview thead tr:first-child > *, .editor-preview-side thead tr:first-child > * { border-top: 0; }
+.editor-preview tbody tr:last-child > *, .editor-preview-side tbody tr:last-child > * { border-bottom: 0; }
+
+.editor-preview th, .editor-preview-side th {
+  background: var(--moss-soft);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* left unless the markdown says otherwise (:---: and ---: set align or text-align) */
+.editor-preview th:not([align]):not([style]), .editor-preview-side th:not([align]):not([style]) { text-align: left; }
+.editor-preview tbody tr:nth-child(even), .editor-preview-side tbody tr:nth-child(even) { background: var(--snow); }
+
+/* Mermaid diagrams */
+.editor-preview > .mermaid-box, .editor-preview-side > .mermaid-box {
+  max-width: 100%;
+  margin: 1.4em 0;
+  overflow-x: auto;
+  font-family: var(--ui);
+  font-size: 14px;
+  color: var(--stone);
+}
+
+.mermaid-box svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+
+.mermaid-box.mermaid-error {
+  padding: 12px 16px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-small);
+  background: var(--paper);
+}
+
+.mermaid-error p { margin: 0 0 10px; color: var(--danger); }
+.mermaid-error pre { margin: 0; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+.mermaid-error code { background: transparent; padding: 0; color: var(--granite); }
+
 .editor-preview img, .editor-preview-side img {
   max-width: 100%;
   height: auto;
@@ -762,9 +955,12 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 
 /* ================= Calendar (FullCalendar) ================= */
 
+/* The calendar is as tall as its content. If that is more than the screen, the page (this view)
+   scrolls, never the calendar itself. */
+#view-calendar { overflow-y: auto; }
+
 #calendar {
-  flex: 1;
-  min-height: 0;
+  flex: none;
   --fc-border-color: var(--mist);
   --fc-page-bg-color: var(--paper);
   --fc-neutral-bg-color: var(--snow);
@@ -852,7 +1048,15 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 .fc .fc-col-header-cell.fc-day-today .fc-col-header-cell-cushion { color: var(--marigold-ink); }
 
 .fc .fc-daygrid-day.fc-day-other .fc-daygrid-day-number { opacity: 0.5; }
-.fc .fc-daygrid-day-frame { min-height: 90px; }
+/* Month: each week row is at least a sixth of the screen, and grows to show all items of a day */
+.fc .fc-daygrid-day-frame { min-height: max(96px, calc((100vh - 330px) / 6)); }
+
+/* Week: 06:00-24:00 is 18 one-hour rows. They stretch to fill the screen (395px = everything above and below them),
+   but never get thinner than 26px */
+.fc .fc-timegrid-slot { height: max(26px, calc((100vh - 395px) / 18)); }
+
+/* No scrollbars inside the calendar */
+.fc .fc-scroller { overflow: visible !important; }
 
 /* Events and tasks */
 .fc .fc-event { cursor: pointer; margin-bottom: 1px; }
@@ -915,6 +1119,26 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 }
 
 .fc-event.task.overdue .box { border-color: var(--marigold); }
+
+/* Later dates of a repeating item: faded, nothing happens on click */
+.fc-event.ghost { opacity: 0.5; cursor: default; }
+.fc-event.ghost .box { cursor: default; }
+.fc-event.ghost .box:hover { background: var(--paper); }
+
+.repeat-icon { display: inline-flex; flex-shrink: 0; margin-left: auto; padding-left: 4px; }
+
+.repeat-icon svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.7;
+}
+
+.task-title .repeat-icon { display: inline-flex; margin-left: 0; padding-left: 8px; vertical-align: -1px; color: var(--stone); }
 
 .fc-timegrid-event .ev { height: 100%; align-items: flex-start; }
 .fc .fc-timegrid-slot-label-cushion,
@@ -1114,6 +1338,8 @@ dialog form > label { margin-bottom: 14px; }
 
 .type-switch label:has(input:focus-visible) { outline: 2px solid var(--focus); }
 
+dialog .repeat-field { margin: 14px 0 0; }
+
 dialog .row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1256,7 +1482,10 @@ dialog .actions {
   #toast { bottom: 78px; }
 
   .view { padding: 18px 14px 14px; gap: 14px; }
-  body[data-view="notes"] .view-head { padding-left: 52px; }
+  /* the notes button sits at the left of the tab strip */
+  #tabs { min-height: 40px; margin: 0 0 0 52px; }
+  .tab { max-width: 150px; padding: 9px 4px 9px 10px; font-size: 13px; }
+  .tab-close { display: flex; }
   .view-head h1, #note-title { font-size: 24px; }
   #save-state { font-size: 0; gap: 0; }       /* keep just the dot */
   #save-state::before { margin: 0; }

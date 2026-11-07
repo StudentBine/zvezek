@@ -1,7 +1,8 @@
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
-const { parseFile, setDone, setDate } = require('./parser');
+const { constants: fsConstants } = require('fs');
+const { parseFile, setDate, completeTask, reopenTask, repeatOf, occurrences, isRealDate, addDays } = require('./parser');
 const { rewriteImageLinks } = require('./links');
 
 const PORT = process.env.PORT || 3000;
@@ -33,6 +34,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/vendor/easymde', express.static(path.join(__dirname, 'node_modules/easymde/dist')));
 app.use('/vendor/fullcalendar', express.static(path.join(__dirname, 'node_modules/fullcalendar')));
 app.use('/vendor/font-awesome', express.static(path.join(__dirname, 'node_modules/font-awesome')));
+app.use('/vendor/mermaid', express.static(path.join(__dirname, 'node_modules/mermaid/dist')));
 app.use('/vendor/fonts/bricolage', express.static(path.join(__dirname, 'node_modules/@fontsource/bricolage-grotesque')));
 app.use('/vendor/fonts/literata', express.static(path.join(__dirname, 'node_modules/@fontsource/literata')));
 
@@ -48,8 +50,9 @@ app.get('/files/*filePath', (req, res) => {
     const rel = parts.join('/');
     if (rel.toLowerCase().endsWith('.md')) throw new Error('Not allowed');
     const full = safeFile(rel);
-    // "sandbox" stops scripts in an SVG from running if someone opens the file directly
-    res.set('Content-Security-Policy', 'sandbox');
+    // "sandbox" stops scripts in an SVG or HTML file from running if someone opens it directly.
+    // It is not set for other files, because it would stop the browser from showing PDFs.
+    if (/\.(svgz?|html?|xhtml|xml)$/i.test(rel)) res.set('Content-Security-Policy', 'sandbox');
     res.set('X-Content-Type-Options', 'nosniff');
     res.sendFile(full, { dotfiles: 'deny' }, (err) => {
       if (err && !res.headersSent) res.status(404).send('Not found');
@@ -104,6 +107,43 @@ async function listNotes(dir = DATA_DIR) {
   return result;
 }
 
+// What kind of file is this? Used for the icon in the sidebar.
+function kindOf(name) {
+  const ext = path.extname(name).toLowerCase();
+  if (ext === '.md') return 'note';
+  if (ext === '.pdf') return 'pdf';
+  if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif', '.ico'].includes(ext)) return 'image';
+  if (['.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz'].includes(ext)) return 'archive';
+  return 'other';
+}
+
+// Lists every file in DATA_DIR (notes and all other files), skipping hidden ones.
+// Symlinks to other files are skipped, so nothing outside DATA_DIR is listed.
+async function listAllFiles(dir = DATA_DIR) {
+  let result = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      result = result.concat(await listAllFiles(full));
+    } else if (entry.name.endsWith('.md') || entry.isFile()) {
+      const stat = await fs.stat(full);
+      result.push({ path: relPath(full), modified: stat.mtimeMs, size: stat.size, kind: kindOf(entry.name) });
+    }
+  }
+  return result;
+}
+
+// A path for any file: notes get ".md" handled like before, other files must not be hidden
+function entryPath(rel) {
+  if (typeof rel === 'string' && rel.endsWith('.md')) return safePath(rel);
+  if (typeof rel === 'string' && rel.split('/').some((part) => part === '..' || part.startsWith('.'))) {
+    throw new Error('Path is not allowed');
+  }
+  return safeFile(rel);
+}
+
 async function writeNote(full, content) {
   await fs.mkdir(path.dirname(full), { recursive: true });
   await fs.writeFile(full, content, 'utf8');
@@ -114,7 +154,8 @@ function relPath(full) {
 }
 
 function conflictError(rel) {
-  const err = new Error('A note named "' + rel.replace(/\.md$/, '') + '" already exists');
+  const what = rel.endsWith('.md') ? 'A note named "' + rel.replace(/\.md$/, '') + '"' : 'A file named "' + rel + '"';
+  const err = new Error(what + ' already exists');
   err.status = 409;
   return err;
 }
@@ -155,13 +196,32 @@ async function moveNote(fromRel, toRel) {
     throw err;
   });
   await fs.unlink(from);
-  // Remove the old folder (and its parents) if they are now empty
-  let dir = path.dirname(from);
+  await removeEmptyFolders(path.dirname(from));
+}
+
+// Removes a folder (and its parents) if they are empty, but never DATA_DIR itself
+async function removeEmptyFolders(dir) {
   while (dir !== DATA_DIR && dir.startsWith(DATA_DIR + path.sep)) {
     const removed = await fs.rmdir(dir).then(() => true).catch(() => false);
     if (!removed) break;
     dir = path.dirname(dir);
   }
+}
+
+// Moves any other file (pdf, image, zip ...). Never overwrites. Nothing inside is changed.
+async function moveFile(fromRel, toRel) {
+  const from = entryPath(fromRel);
+  const to = entryPath(toRel);
+  if (from === to) return;
+  await fs.stat(from);
+  await fs.mkdir(path.dirname(to), { recursive: true });
+  // COPYFILE_EXCL fails instead of overwriting an existing file
+  await fs.copyFile(from, to, fsConstants.COPYFILE_EXCL).catch((err) => {
+    if (err.code === 'EEXIST') throw conflictError(relPath(to));
+    throw err;
+  });
+  await fs.unlink(from);
+  await removeEmptyFolders(path.dirname(from));
 }
 
 // Wraps a route so errors become a JSON response instead of crashing
@@ -179,7 +239,7 @@ function handle(fn) {
 // ---------- Notes API ----------
 
 app.get('/api/notes', handle(async (req, res) => {
-  const notes = await listNotes();
+  const notes = await listAllFiles();
   notes.sort((a, b) => a.path.localeCompare(b.path));
   res.json(notes);
 }));
@@ -229,10 +289,11 @@ app.post('/api/notes/move', handle(async (req, res) => {
   const failed = [];
   for (const rel of paths) {
     try {
-      const from = safePath(rel);
-      const to = safePath(folder ? folder + '/' + path.basename(from) : path.basename(from));
+      const from = entryPath(rel);
+      const to = entryPath(folder ? folder + '/' + path.basename(from) : path.basename(from));
       if (from === to) throw new Error('already in that folder');
-      await moveNote(relPath(from), relPath(to));
+      if (from.endsWith('.md')) await moveNote(relPath(from), relPath(to));
+      else await moveFile(relPath(from), relPath(to));
       moved.push({ from: relPath(from), to: relPath(to) });
     } catch (err) {
       failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
@@ -250,9 +311,10 @@ app.post('/api/notes/delete', handle(async (req, res) => {
   const failed = [];
   for (const rel of paths) {
     try {
-      const full = safePath(rel);
+      const full = entryPath(rel);
       await fs.unlink(full);
-      deleted.push(path.relative(DATA_DIR, full).split(path.sep).join('/'));
+      await removeEmptyFolders(path.dirname(full));
+      deleted.push(relPath(full));
     } catch (err) {
       failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
     }
@@ -272,8 +334,16 @@ app.get('/api/search', handle(async (req, res) => {
       const start = Math.max(0, index - 40);
       results.push({
         path: note.path,
+        kind: 'note',
         snippet: index === -1 ? '' : content.slice(start, index + q.length + 60).replace(/\n/g, ' '),
       });
+    }
+  }
+
+  // Other files (pdf, zip, images ...) match on their name only
+  for (const file of await listAllFiles()) {
+    if (file.kind !== 'note' && file.path.toLowerCase().includes(q)) {
+      results.push({ path: file.path, kind: file.kind, snippet: '', size: file.size });
     }
   }
   res.json(results);
@@ -281,14 +351,43 @@ app.get('/api/search', handle(async (req, res) => {
 
 // ---------- Tasks & events API ----------
 
+// With ?from=YYYY-MM-DD&to=YYYY-MM-DD, repeating items also get "occurrences": the other dates
+// of the series inside that range. Events: all of them. Open tasks: only the next 3.
 app.get('/api/items', handle(async (req, res) => {
   let items = [];
   for (const note of await listNotes()) {
     const content = await fs.readFile(safePath(note.path), 'utf8');
     items = items.concat(parseFile(note.path, content));
   }
+
+  const { from, to } = req.query;
+  if (from !== undefined || to !== undefined) {
+    if (!isRealDate(from) || !isRealDate(to)) throw new Error('from and to must be dates (YYYY-MM-DD)');
+    for (const item of items) {
+      if (!item.repeat || (item.type === 'task' && item.done)) continue;
+      const info = repeatOf(item.raw);
+      if (!info) continue;
+      let dates;
+      if (item.type === 'event') {
+        dates = occurrences(info.rule, info.date, from, to);
+      } else {
+        dates = occurrences(info.rule, info.date, addDays(info.date, 1), '9999-12-31', 3)
+          .filter((date) => date >= from && date <= to);
+      }
+      item.occurrences = dates.filter((date) => date !== info.date);
+    }
+  }
   res.json(items);
 }));
+
+// Repeat choices of the Add dialog, in Obsidian Tasks wording
+const REPEAT_CHOICES = {
+  daily: 'every day',
+  weekly: 'every week',
+  monthly: 'every month',
+  yearly: 'every year',
+  weekdays: 'every weekday',
+};
 
 // Quick add: appends a task or event to the inbox note
 app.post('/api/items', handle(async (req, res) => {
@@ -296,6 +395,14 @@ app.post('/api/items', handle(async (req, res) => {
   if (!text) throw new Error('Write what the task is first');
 
   let line = req.body.type === 'event' ? '- ' + text : '- [ ] ' + text;
+
+  // Repeat: the Obsidian Tasks text goes before the date ("... 🔁 every week 📅 2026-11-09")
+  const repeat = req.body.repeat || 'none';
+  if (repeat !== 'none') {
+    if (!REPEAT_CHOICES[repeat]) throw new Error('Unknown repeat option');
+    if (!req.body.date) throw new Error('Pick a date for a repeating item');
+    line += ' 🔁 ' + REPEAT_CHOICES[repeat];
+  }
   if (req.body.date) {
     line = setDate(line, req.body.date, req.body.time || null);
   }
@@ -318,16 +425,25 @@ app.patch('/api/items', handle(async (req, res) => {
     return res.status(409).json({ error: 'This note changed in the meantime. Reload and try again.' });
   }
 
+  // The ticked line, and for a repeating task also a new open line above it (see parser.js)
+  let newLines = [line];
   if (typeof req.body.done === 'boolean') {
-    line = setDone(line, req.body.done);
+    const item = parseFile(req.body.path, line)[0];
+    if (req.body.done && item && item.type === 'task' && !item.done) {
+      const today = isRealDate(req.body.today) ? req.body.today : new Date().toISOString().slice(0, 10);
+      newLines = completeTask(line, today);
+    } else if (!req.body.done) {
+      newLines = [reopenTask(line)];
+    }
   }
   if (req.body.date) {
-    line = setDate(line, req.body.date, req.body.time || null);
+    const last = newLines.length - 1;
+    newLines[last] = setDate(newLines[last], req.body.date, req.body.time || null);
   }
 
-  lines[req.body.line] = line;
+  lines.splice(req.body.line, 1, ...newLines);
   await writeNote(full, lines.join('\n'));
-  res.json({ ok: true, raw: line });
+  res.json({ ok: true, raw: newLines[newLines.length - 1], inserted: newLines.length - 1 });
 }));
 
 // ---------- Start ----------

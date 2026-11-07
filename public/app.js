@@ -32,6 +32,14 @@ function noteFolder(path) {
   return path.split('/').slice(0, -1).join('/');
 }
 
+// 1536 -> "1.5 KB"
+function prettySize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(bytes < 10240 ? 1 : 0) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
 // Date as YYYY-MM-DD in local time
 function isoDate(date) {
   const y = date.getFullYear();
@@ -51,7 +59,8 @@ function prettyDate(iso) {
 
 // ================= State =================
 
-let notes = [];          // list of { path, modified }
+let entries = [];        // every file in the notes folder: { path, modified, size, kind }
+let notes = [];          // only the notes (kind "note"), the ones that open in the editor
 let items = [];          // tasks and events from all notes
 let currentPath = null;  // note open in the editor
 let saveTimer = null;
@@ -64,15 +73,54 @@ let anchorPath = null;      // where a Shift+click range starts
 // ================= Notes list =================
 
 async function loadNotes() {
-  notes = await api('/api/notes');
+  entries = await api('/api/notes');
+  notes = entries.filter((e) => e.kind === 'note');
   for (const path of Array.from(selected)) {
-    if (!notes.some((n) => n.path === path)) selected.delete(path);
+    if (!entries.some((e) => e.path === path)) selected.delete(path);
   }
-  renderNoteList(notes);
+  renderNoteList(entries);
   updateSelectBar();
 }
 
-// Groups notes by folder and draws them in the sidebar
+// Small icons for files that are not notes
+const FILE_ICONS = {
+  pdf: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/><text x="12.5" y="17.3" font-size="6.2" font-weight="700" text-anchor="middle" fill="currentColor" stroke="none">PDF</text>',
+  image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 4 4 3-3 4 4"/>',
+  archive: '<path d="M4 8h16v12H4z"/><path d="M3 4h18v4H3zM10 12h4"/>',
+  other: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5"/>',
+};
+
+// A file that is not a note: opens /files/<path> in a new browser tab
+function fileLink(file) {
+  const link = document.createElement('a');
+  link.className = 'note-link file-link' + (selected.has(file.path) ? ' selected' : '');
+  link.dataset.path = file.path;
+  link.dataset.kind = file.kind;
+  link.href = '/files/' + file.path.split('/').map(encodeURIComponent).join('/');
+  link.target = '_blank';
+  link.rel = 'noopener';
+  const name = file.path.split('/').pop();
+  link.title = name + (typeof file.size === 'number' ? ' (' + prettySize(file.size) + ')' : '');
+  link.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + (FILE_ICONS[file.kind] || FILE_ICONS.other) + '</svg>';
+  const label = document.createElement('span');
+  label.textContent = name;
+  link.appendChild(label);
+
+  link.addEventListener('click', (e) => {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      e.preventDefault();          // selecting, not opening
+      onNoteClick(e, file.path);
+    } else {
+      selected.clear();            // plain click: the browser opens the file in a new tab
+      anchorPath = file.path;
+      updateSelectBar();
+    }
+  });
+  return link;
+}
+
+// Groups notes and files by folder and draws them in the sidebar.
+// list: { path, kind, size? }. In each folder the notes come first, then the other files.
 function renderNoteList(list, snippets = {}) {
   const container = document.getElementById('note-list');
   container.innerHTML = '';
@@ -93,15 +141,22 @@ function renderNoteList(list, snippets = {}) {
 
   for (const folder of folderNames) {
     const ul = document.createElement('ul');
+    const inFolder = folders[folder];
+    const ordered = inFolder.filter((n) => n.kind === 'note').concat(inFolder.filter((n) => n.kind !== 'note'));
 
-    for (const note of folders[folder]) {
+    for (const note of ordered) {
       const li = document.createElement('li');
-      const btn = document.createElement('button');
-      btn.textContent = noteName(note.path);
-      btn.dataset.path = note.path;
-      btn.className = 'note-link' + (note.path === currentPath ? ' current' : '') + (selected.has(note.path) ? ' selected' : '');
-      btn.addEventListener('click', (e) => onNoteClick(e, note.path));
-      li.appendChild(btn);
+
+      if (note.kind === 'note') {
+        const btn = document.createElement('button');
+        btn.textContent = noteName(note.path);
+        btn.dataset.path = note.path;
+        btn.className = 'note-link' + (note.path === currentPath ? ' current' : '') + (selected.has(note.path) ? ' selected' : '');
+        btn.addEventListener('click', (e) => onNoteClick(e, note.path));
+        li.appendChild(btn);
+      } else {
+        li.appendChild(fileLink(note));
+      }
 
       if (snippets[note.path]) {
         const small = document.createElement('small');
@@ -126,7 +181,7 @@ function renderNoteList(list, snippets = {}) {
 
   if (list.length === 0) {
     container.innerHTML = '<p class="sidebar-empty">'
-      + (document.getElementById('search').value.trim() ? 'No notes match your search.' : 'No notes yet. Use + to add one.')
+      + (document.getElementById('search').value.trim() ? 'Nothing matches your search.' : 'No notes yet. Use + to add one.')
       + '</p>';
   }
 }
@@ -146,21 +201,27 @@ const editor = new EasyMDE({
     'bold', 'italic', 'heading', '|',
     'unordered-list', 'ordered-list',
     { name: 'task', action: insertTask, className: 'fa fa-check-square-o', title: 'Insert task' },
-    '|', 'link', 'quote', 'code', '|',
+    '|', 'link', 'quote', 'code', 'table', 'horizontal-rule', '|',
     'preview', 'side-by-side',
   ],
   // Turn [[Note name]] into clickable links in the preview
-  previewRender: (text) => {
+  previewRender: (text, preview) => {
     const withLinks = text.replace(/\[\[([^\]]+)\]\]/g, (match, name) => {
       return '<a href="#" class="wikilink" data-note="' + name.replace(/"/g, '') + '">' + name + '</a>';
     });
-    return fixImagePaths(editor.markdown(withLinks));
+    const html = preparePreview(editor.markdown(withLinks));
+    // Diagrams are drawn right after EasyMDE has put this html on the page
+    if (preview) setTimeout(() => drawDiagrams(preview), 0);
+    return html;
   },
 });
 
-// Images: ![](pic.png) or ![](Folder/my%20pic.png) are relative to the folder of the open note.
-// They are served by the backend at /files/<path>.
-function fixImagePaths(html) {
+// Changes the html that marked made, before it is shown:
+// - images: ![](pic.png) or ![](Folder/my%20pic.png) are relative to the folder of the open note
+//   and are served by the backend at /files/<path>
+// - tables get a wrapper, so a wide table scrolls sideways instead of overflowing
+// - ```mermaid blocks become a box that drawDiagrams() fills with the diagram
+function preparePreview(html) {
   const box = document.createElement('template');   // a template does not load images
   box.innerHTML = html;
   const base = currentPath ? noteFolder(currentPath).split('/').filter(Boolean) : [];
@@ -181,7 +242,137 @@ function fixImagePaths(html) {
     img.setAttribute('src', '/files/' + parts.map(encodeURIComponent).join('/'));
     img.setAttribute('loading', 'lazy');
   });
+
+  box.content.querySelectorAll('table').forEach((table) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'table-scroll';
+    table.replaceWith(wrap);
+    wrap.appendChild(table);
+  });
+
+  box.content.querySelectorAll('pre > code.language-mermaid').forEach((code) => {
+    const holder = document.createElement('div');
+    holder.className = 'mermaid-box';
+    holder.dataset.source = code.textContent;
+    const done = diagramResults[diagramKey(code.textContent)];
+    if (done) fillDiagramBox(holder, done);     // drawn before: no flicker while typing
+    else holder.textContent = 'Drawing diagram…';
+    code.parentElement.replaceWith(holder);
+  });
+
   return box.innerHTML;
+}
+
+// ---------- Mermaid diagrams ----------
+// The library (about 5 MB) is only loaded the first time a note has a diagram.
+
+let mermaidLoading = null;
+function loadMermaid() {
+  if (!mermaidLoading) {
+    mermaidLoading = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = '/vendor/mermaid/mermaid.min.js';
+      script.onload = resolve;
+      script.onerror = () => { mermaidLoading = null; reject(new Error('Could not load the diagram library')); };
+      document.head.appendChild(script);
+    });
+  }
+  return mermaidLoading;
+}
+
+function isDark() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+// Colours of the Pohorje palette, for light and dark
+function mermaidTheme() {
+  const font = '"Bricolage Grotesque", system-ui, sans-serif';
+  if (isDark()) {
+    return {
+      fontFamily: font, background: '#1D2321', mainBkg: '#2B4A40', primaryColor: '#2B4A40', primaryTextColor: '#E4E8E5',
+      primaryBorderColor: '#8DAA80', lineColor: '#98A39D', secondaryColor: '#26332B', tertiaryColor: '#1D2321',
+      textColor: '#E4E8E5', nodeTextColor: '#E4E8E5', noteBkgColor: '#26332B', noteTextColor: '#E4E8E5', noteBorderColor: '#8DAA80',
+      actorBkg: '#2B4A40', actorBorder: '#8DAA80', actorTextColor: '#E4E8E5', actorLineColor: '#98A39D', signalColor: '#E4E8E5',
+      signalTextColor: '#E4E8E5', labelBoxBkgColor: '#26332B', labelBoxBorderColor: '#8DAA80', labelTextColor: '#E4E8E5',
+      loopTextColor: '#E4E8E5', activationBkgColor: '#26332B', activationBorderColor: '#8DAA80', edgeLabelBackground: '#1D2321',
+      clusterBkg: '#26332B', clusterBorder: '#2F3834', titleColor: '#E4E8E5',
+    };
+  }
+  return {
+    fontFamily: font, background: '#FFFFFF', mainBkg: '#CFE0D8', primaryColor: '#CFE0D8', primaryTextColor: '#2E3236',
+    primaryBorderColor: '#234B3F', lineColor: '#6F7A74', secondaryColor: '#E3ECDF', tertiaryColor: '#F6F7F5',
+    textColor: '#2E3236', nodeTextColor: '#2E3236', noteBkgColor: '#E3ECDF', noteTextColor: '#2E3236', noteBorderColor: '#5F7D54',
+    actorBkg: '#CFE0D8', actorBorder: '#234B3F', actorTextColor: '#2E3236', actorLineColor: '#6F7A74', signalColor: '#2E3236',
+    signalTextColor: '#2E3236', labelBoxBkgColor: '#E3ECDF', labelBoxBorderColor: '#234B3F', labelTextColor: '#2E3236',
+    loopTextColor: '#2E3236', activationBkgColor: '#E3ECDF', activationBorderColor: '#234B3F', edgeLabelBackground: '#FFFFFF',
+    clusterBkg: '#F6F7F5', clusterBorder: '#DDE3DE', titleColor: '#2E3236',
+  };
+}
+
+const diagramResults = {};      // finished diagrams: { svg } or { error }, so they are not drawn twice
+const diagramJobs = {};         // diagrams being drawn right now
+let diagramQueue = Promise.resolve();   // mermaid draws one diagram at a time
+let diagramCount = 0;
+
+function diagramKey(source) {
+  return (isDark() ? 'dark' : 'light') + '\n' + source;
+}
+
+// Draws one diagram (or finds out why it is broken)
+function drawOne(source, key) {
+  const id = 'mermaid-' + (++diagramCount);
+  return loadMermaid()
+    .then(() => {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'base', themeVariables: mermaidTheme(), suppressErrorRendering: true });
+      return mermaid.render(id, source);
+    })
+    .then((result) => ({ svg: result.svg }))
+    .catch((err) => {
+      const leftover = document.getElementById('d' + id);   // mermaid may leave an error drawing in the page
+      if (leftover) leftover.remove();
+      const first = String((err && err.message) || err).split('\n')[0].trim();
+      return { error: first.length > 140 ? first.slice(0, 140) + '…' : first };
+    })
+    .then((result) => {
+      diagramResults[key] = result;
+      return result;
+    });
+}
+
+function fillDiagramBox(box, result) {
+  box.className = 'mermaid-box';
+  box.textContent = '';
+  if (result.svg) {
+    box.innerHTML = result.svg;
+    box.dataset.state = 'done';
+    return;
+  }
+  // A broken diagram: a short message, and the source so it can be fixed
+  box.classList.add('mermaid-error');
+  box.dataset.state = 'error';
+  const message = document.createElement('p');
+  const label = document.createElement('strong');
+  label.textContent = 'Diagram error: ';
+  message.append(label, document.createTextNode(result.error));
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.textContent = box.dataset.source;
+  pre.appendChild(code);
+  box.append(message, pre);
+}
+
+// Fills every diagram box inside "root" (the preview element)
+async function drawDiagrams(root) {
+  const boxes = Array.from(root.querySelectorAll('.mermaid-box')).filter((b) => !b.dataset.state);
+  for (const box of boxes) {
+    const source = box.dataset.source;
+    const key = diagramKey(source);
+    if (!diagramJobs[key]) {
+      diagramJobs[key] = diagramQueue = diagramQueue.then(() => diagramResults[key] || drawOne(source, key));
+    }
+    const result = await diagramJobs[key];
+    if (box.isConnected) fillDiagramBox(box, result);
+  }
 }
 
 function insertTask() {
@@ -287,10 +478,14 @@ document.querySelector('.editor-wrap').addEventListener('click', async (e) => {
   }
 });
 
+let saveStateText = '';
+
 function setSaveState(text) {
   const el = document.getElementById('save-state');
   el.textContent = text;
   el.dataset.state = text.toLowerCase().replace(' ', '-');
+  saveStateText = text;
+  updateTabDots();
 }
 
 async function saveNote() {
@@ -309,23 +504,257 @@ async function saveNote() {
   }
 }
 
-async function openNote(path) {
+// ================= Tabs =================
+// Every open note is a tab. There is still only one editor: switching tabs saves the note,
+// loads the other one and puts the cursor and scroll position back where they were.
+
+let tabs = [];   // [{ path, cursor, scroll }] in the order shown
+
+function tabFor(path) {
+  return tabs.find((t) => t.path === path);
+}
+
+// Cursor and scroll position of the open note, so they can be restored later
+function rememberTab() {
+  const tab = tabFor(currentPath);
+  if (!tab) return;
+  tab.cursor = editor.codemirror.getCursor();
+  tab.scroll = editor.codemirror.getScrollInfo();
+}
+
+function saveTabs() {
+  try {
+    localStorage.setItem('tabs', JSON.stringify(tabs.map((t) => t.path)));
+    if (currentPath) localStorage.setItem('lastNote', currentPath);
+    else localStorage.removeItem('lastNote');
+  } catch (err) { /* private mode: tabs just are not remembered */ }
+}
+
+// "RIRS", or "School/RIRS" when another open tab has the same name
+function tabLabel(path) {
+  const name = noteName(path);
+  const clash = tabs.some((t) => t.path !== path && noteName(t.path) === name);
+  return clash ? path.replace(/\.md$/, '') : name;
+}
+
+// The dot on the tab of the note with unsaved changes
+function updateTabDots() {
+  const unsaved = saveStateText === 'Unsaved' || saveStateText === 'Not saved';
+  document.querySelectorAll('#tabs .tab').forEach((el) => {
+    el.classList.toggle('unsaved', unsaved && el.dataset.path === currentPath);
+  });
+}
+
+let draggedTab = null;
+
+function clearDropMarks() {
+  document.querySelectorAll('#tabs .drop-before, #tabs .drop-after').forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+}
+
+function renderTabs() {
+  const bar = document.getElementById('tabs');
+  bar.innerHTML = '';
+  bar.hidden = tabs.length === 0;
+
+  for (const tab of tabs) {
+    const el = document.createElement('div');
+    el.className = 'tab' + (tab.path === currentPath ? ' active' : '');
+    el.dataset.path = tab.path;
+    el.setAttribute('role', 'tab');
+    el.setAttribute('aria-selected', tab.path === currentPath ? 'true' : 'false');
+    el.tabIndex = 0;
+    el.draggable = true;
+    el.title = tab.path.replace(/\.md$/, '');
+
+    const label = document.createElement('span');
+    label.className = 'tab-label';
+    label.textContent = tabLabel(tab.path);
+    const dot = document.createElement('span');
+    dot.className = 'tab-dot';
+    dot.title = 'Unsaved changes';
+    const close = document.createElement('button');
+    close.className = 'tab-close';
+    close.setAttribute('aria-label', 'Close ' + noteName(tab.path));
+    close.title = 'Close (Alt+W)';
+    close.textContent = '×';
+    el.append(label, dot, close);
+
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.tab-close')) return;
+      if (tab.path !== currentPath) openNote(tab.path);
+    });
+    el.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
+        e.preventDefault();
+        if (tab.path !== currentPath) openNote(tab.path);
+      }
+    });
+    close.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeTab(tab.path);
+    });
+    // Middle click closes (mousedown is stopped so the browser does not start auto-scroll)
+    el.addEventListener('mousedown', (e) => { if (e.button === 1) e.preventDefault(); });
+    el.addEventListener('auxclick', (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        closeTab(tab.path);
+      }
+    });
+
+    // Drag to reorder
+    el.addEventListener('dragstart', (e) => {
+      draggedTab = tab.path;
+      e.dataTransfer.effectAllowed = 'move';
+      // a custom type, so dropping a tab on the editor does not paste its name
+      e.dataTransfer.setData('application/x-zvezek-tab', tab.path);
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragover', (e) => {
+      if (!draggedTab) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const after = e.clientX > rect.left + rect.width / 2;
+      clearDropMarks();
+      if (tab.path !== draggedTab) el.classList.add(after ? 'drop-after' : 'drop-before');
+    });
+    el.addEventListener('drop', (e) => {
+      if (!draggedTab) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const after = e.clientX > rect.left + rect.width / 2;
+      moveTab(draggedTab, tab.path, after);
+    });
+    el.addEventListener('dragend', () => {
+      draggedTab = null;
+      clearDropMarks();
+      el.classList.remove('dragging');
+    });
+
+    bar.appendChild(el);
+  }
+
+  updateTabDots();
+  const active = bar.querySelector('.tab.active');
+  if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+// Puts the tab "path" before or after the tab "targetPath"
+function moveTab(path, targetPath, after) {
+  const from = tabs.findIndex((t) => t.path === path);
+  if (from === -1 || path === targetPath) return;
+  const [moved] = tabs.splice(from, 1);
+  const to = tabs.findIndex((t) => t.path === targetPath) + (after ? 1 : 0);
+  tabs.splice(to, 0, moved);
+  saveTabs();
+  renderTabs();
+}
+
+// Closes a tab. Closing the open note saves it first and moves to the neighbour tab.
+async function closeTab(path) {
+  const index = tabs.findIndex((t) => t.path === path);
+  if (index === -1) return;
+
+  if (path !== currentPath) {
+    tabs.splice(index, 1);
+    saveTabs();
+    renderTabs();
+    return;
+  }
+
   await saveNote();
+  if (dirty && !confirm('"' + noteName(path) + '" could not be saved. Close it anyway?')) return;
+
+  tabs.splice(index, 1);
+  const next = tabs[index] || tabs[index - 1];
+  if (next) {
+    dirty = false;
+    await openNote(next.path);
+  } else {
+    showNothingOpen();
+  }
+}
+
+// No tab left: back to the empty state
+function showNothingOpen() {
+  currentPath = null;
+  dirty = false;
+  clearTimeout(saveTimer);
+  setSaveState('');
+  showNoteEditor(false);
+  renderTabs();
+  renderNoteList(entries);
+  saveTabs();
+}
+
+// Notes were deleted (here or from the multi-select): close their tabs, no saving
+async function forgetNotes(paths) {
+  const gone = new Set(paths);
+  const wasOpen = currentPath && gone.has(currentPath);
+  const index = tabs.findIndex((t) => t.path === currentPath);
+
+  tabs = tabs.filter((t) => !gone.has(t.path));
+  if (!wasOpen) {
+    saveTabs();
+    renderTabs();
+    return;
+  }
+  dirty = false;
+  clearTimeout(saveTimer);
+  const next = tabs[Math.min(index, tabs.length - 1)];
+  if (next) await openNote(next.path);
+  else showNothingOpen();
+}
+
+// Notes were renamed or moved: their tabs follow. changes = { "old/path.md": "new/path.md" }
+function renameTabs(changes) {
+  for (const tab of tabs) {
+    if (changes[tab.path]) tab.path = changes[tab.path];
+  }
+  if (currentPath && changes[currentPath]) {
+    currentPath = changes[currentPath];
+    document.getElementById('note-title').value = currentPath.replace(/\.md$/, '');
+  }
+  saveTabs();
+  renderTabs();
+}
+
+// Open a note (in its tab, or in a new one). quiet = do not move the keyboard focus.
+async function openNote(path, quiet = false) {
+  await saveNote();
+  rememberTab();
   try {
     const data = await api('/api/note?path=' + encodeURIComponent(path));
     currentPath = path;
-    localStorage.setItem('lastNote', path);
+    if (!tabFor(path)) tabs.push({ path: path });
+    const tab = tabFor(path);
+
     if (editor.isPreviewActive()) editor.togglePreview(); // the preview would still show the old note
     editor.value(data.content);
     dirty = false;
     setSaveState('');
     document.getElementById('note-title').value = path.replace(/\.md$/, '');
-    showNoteEditor(true);
     showView('notes');
-    renderNoteList(notes);
+    showNoteEditor(true);
+
+    // back where I was in this note
+    const cm = editor.codemirror;
+    if (tab.cursor) cm.setCursor(tab.cursor);
+    if (tab.scroll) cm.scrollTo(tab.scroll.left, tab.scroll.top);
+    if (!quiet && desktop.matches) cm.focus();
+
+    renderTabs();
+    saveTabs();
+    renderNoteList(entries);
     document.body.classList.remove('menu-open');
   } catch (err) {
     toast(err.message, true);
+    // a note that is gone should not stay as a tab
+    if (/not found/i.test(err.message) && tabFor(path) && path !== currentPath) {
+      tabs = tabs.filter((t) => t.path !== path);
+      saveTabs();
+      renderTabs();
+    }
   }
 }
 
@@ -397,8 +826,7 @@ titleInput.addEventListener('blur', async () => {
   try {
     await saveNote();
     await api('/api/rename', { method: 'POST', body: { from: currentPath, to: newPath } });
-    currentPath = newPath;
-    localStorage.setItem('lastNote', newPath);
+    renameTabs({ [currentPath]: newPath });
     await loadNotes();
     await reloadOpenNote();
     toast('Renamed');
@@ -412,12 +840,10 @@ document.getElementById('delete-note').addEventListener('click', async () => {
   if (!currentPath) return;
   if (!confirm('Delete "' + noteName(currentPath) + '"? This cannot be undone.')) return;
   try {
-    await api('/api/note?path=' + encodeURIComponent(currentPath), { method: 'DELETE' });
-    currentPath = null;
-    dirty = false;
-    localStorage.removeItem('lastNote');
-    showNoteEditor(false);
+    const deletedPath = currentPath;
+    await api('/api/note?path=' + encodeURIComponent(deletedPath), { method: 'DELETE' });
     await loadNotes();
+    await forgetNotes([deletedPath]);
     toast('Deleted');
   } catch (err) {
     toast(err.message, true);
@@ -490,25 +916,21 @@ document.getElementById('select-clear').addEventListener('click', clearSelection
 document.getElementById('select-delete').addEventListener('click', async () => {
   const paths = Array.from(selected);
   if (paths.length < 2) return;
-  if (!confirm('Delete ' + paths.length + ' notes? This cannot be undone.')) return;
+  const what = paths.every((p) => p.endsWith('.md')) ? 'notes' : 'items';
+  if (!confirm('Delete ' + paths.length + ' ' + what + '? This cannot be undone.')) return;
 
   try {
     await saveNote();   // do not lose edits of the open note
     const result = await api('/api/notes/delete', { method: 'POST', body: { paths: paths } });
 
-    if (currentPath && result.deleted.includes(currentPath)) {
-      currentPath = null;
-      dirty = false;
-      localStorage.removeItem('lastNote');
-      showNoteEditor(false);
-    }
     await afterBulkChange();
+    await forgetNotes(result.deleted);
 
     if (result.failed.length) {
       toast('Deleted ' + result.deleted.length + ', ' + result.failed.length + ' failed: '
         + result.failed.map((f) => noteName(f.path) + ' (' + f.error + ')').join(', '), true, 8000);
     } else {
-      toast('Deleted ' + result.deleted.length + ' notes');
+      toast('Deleted ' + result.deleted.length + (result.deleted.every((p) => p.endsWith('.md')) ? ' notes' : ' items'));
     }
   } catch (err) {
     toast(err.message, true);
@@ -524,7 +946,7 @@ const moveNew = document.getElementById('move-new');
 // Every folder that exists, including the parents of nested ones ("A/B" gives "A" and "A/B")
 function allFolders() {
   const folders = new Set();
-  for (const note of notes) {
+  for (const note of entries) {
     const parts = noteFolder(note.path).split('/').filter(Boolean);
     for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join('/'));
   }
@@ -544,7 +966,7 @@ document.getElementById('select-move').addEventListener('click', () => {
   for (const folder of allFolders()) addOption(moveSelect, 'f:' + folder, folder);
   addOption(moveSelect, '__new__', 'New folder…');
 
-  document.getElementById('move-title').textContent = 'Move ' + selected.size + ' notes';
+  document.getElementById('move-title').textContent = 'Move ' + selected.size + ' items';
   document.getElementById('move-new-wrap').hidden = true;
   moveNew.value = '';
   moveDialog.showModal();
@@ -578,14 +1000,10 @@ document.getElementById('move-form').addEventListener('submit', async (e) => {
     const result = await api('/api/notes/move', { method: 'POST', body: { paths: paths, folder: folder } });
     moveDialog.close();
 
-    // The open note stays open, at its new path
-    for (const m of result.moved) {
-      if (m.from === currentPath) {
-        currentPath = m.to;
-        localStorage.setItem('lastNote', m.to);
-        document.getElementById('note-title').value = m.to.replace(/\.md$/, '');
-      }
-    }
+    // Open notes (and their tabs) stay open, at their new path
+    const changes = {};
+    for (const m of result.moved) changes[m.from] = m.to;
+    renameTabs(changes);
     await afterBulkChange();
     await reloadOpenNote();
 
@@ -594,7 +1012,7 @@ document.getElementById('move-form').addEventListener('submit', async (e) => {
       toast('Moved ' + result.moved.length + ' to ' + where + '. Not moved: '
         + result.failed.map((f) => noteName(f.path) + ' (' + f.error + ')').join(', '), true, 8000);
     } else {
-      toast('Moved ' + result.moved.length + ' notes to ' + where);
+      toast('Moved ' + result.moved.length + (result.moved.every((m) => m.to.endsWith('.md')) ? ' notes' : ' items') + ' to ' + where);
     }
   } catch (err) {
     toast(err.message, true);
@@ -715,14 +1133,16 @@ document.getElementById('search').addEventListener('input', (e) => {
     const results = await api('/api/search?q=' + encodeURIComponent(q));
     const snippets = {};
     for (const r of results) snippets[r.path] = r.snippet;
-    renderNoteList(results.map((r) => ({ path: r.path })), snippets);
+    renderNoteList(results, snippets);
   }, 250);
 });
 
 // ================= Tasks & events =================
 
-async function loadItems() {
-  items = await api('/api/items');
+// Without a range: all tasks and events. With a range (YYYY-MM-DD): repeating items also come
+// with "occurrences", the other dates of their series inside that range.
+async function loadItems(from, to) {
+  items = await api('/api/items' + (from ? '?from=' + from + '&to=' + to : ''));
   updateOverdueBadge();
 }
 
@@ -740,7 +1160,7 @@ async function updateItem(item, changes) {
   try {
     const result = await api('/api/items', {
       method: 'PATCH',
-      body: { path: item.path, line: item.line, raw: item.raw, ...changes },
+      body: { path: item.path, line: item.line, raw: item.raw, today: isoDate(new Date()), ...changes },
     });
     item.raw = result.raw;
     if (typeof changes.done === 'boolean') item.done = changes.done;
@@ -752,19 +1172,32 @@ async function updateItem(item, changes) {
 }
 
 async function refreshItems() {
-  await loadItems();
-  if (currentView === 'calendar') calendar.refetchEvents();
+  if (currentView === 'calendar') calendar.refetchEvents();   // loads the items itself
+  else await loadItems();
   if (currentView === 'tasks') renderTasks();
 }
 
 // ---------- Calendar ----------
+
+// Small "repeat" arrows with the rule as tooltip
+function repeatIcon(item) {
+  const icon = document.createElement('span');
+  icon.className = 'repeat-icon';
+  icon.title = 'Repeats: ' + item.repeat.text + (item.repeat.until ? ' until ' + item.repeat.until : '');
+  icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l3 3-3 3"/><path d="M4 11V9a3 3 0 0 1 3-3h13"/><path d="M7 21l-3-3 3-3"/><path d="M20 13v2a3 3 0 0 1-3 3H4"/></svg>';
+  return icon;
+}
+
+function eventStart(item, date) {
+  return item.time ? date + 'T' + item.time.padStart(5, '0') : date;
+}
 
 function itemToEvent(item, index) {
   const event = {
     id: String(index),
     title: item.title,
     allDay: !item.time,
-    start: item.time ? item.date + 'T' + item.time.padStart(5, '0') : item.date,
+    start: eventStart(item, item.date),
     classNames: [item.type, item.done ? 'done' : 'open'],
     extendedProps: { item: item },
   };
@@ -774,36 +1207,86 @@ function itemToEvent(item, index) {
   return event;
 }
 
+// A later date of a repeating item: faded, cannot be clicked, dragged or ticked
+function ghostEvent(item, index, date) {
+  return {
+    id: index + '-' + date,
+    title: item.title,
+    allDay: !item.time,
+    start: eventStart(item, date),
+    classNames: [item.type, 'open', 'ghost'],
+    editable: false,
+    extendedProps: { item: item, ghost: true },
+  };
+}
+
+function buildEvents() {
+  const events = [];
+  items.forEach((item, index) => {
+    if (!item.date) return;
+    events.push(itemToEvent(item, index));
+    for (const date of item.occurrences || []) events.push(ghostEvent(item, index, date));
+  });
+  return events;
+}
+
+// The week view shows 06:00-24:00. Earlier items would be hidden, so the range grows for them.
+function fitWeekHours(events) {
+  let first = 6;
+  for (const event of events) {
+    if (!event.allDay) first = Math.min(first, parseInt(event.start.slice(11, 13), 10));
+  }
+  const want = String(first).padStart(2, '0') + ':00:00';
+  if (calendar.getOption('slotMinTime') !== want) calendar.setOption('slotMinTime', want);
+}
+
 function setupCalendar() {
   calendar = new FullCalendar.Calendar(document.getElementById('calendar'), {
     initialView: localStorage.getItem('calendarView') || 'dayGridMonth',
     firstDay: 1,
-    height: '100%',
+    height: 'auto',               // the calendar is as tall as its content: no scrollbars inside it
     editable: true,
     eventStartEditable: true,
     eventDurationEditable: false,
-    dayMaxEvents: 4,
+    dayMaxEvents: 8,              // "+N more" only for a really busy day
     nowIndicator: true,
+    slotMinTime: '06:00:00',
+    slotMaxTime: '24:00:00',
+    slotDuration: '01:00:00',
+    snapDuration: '00:15:00',     // dragging still snaps to 15 minutes
+    views: { timeGridWeek: { dayMaxEvents: false } },   // the all-day row grows instead
     eventTimeFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
     slotLabelFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
     headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,listWeek' },
     buttonText: { today: 'Today', month: 'Month', week: 'Week', list: 'List' },
 
-    events: (info, success) => {
-      success(items.filter((item) => item.date).map(itemToEvent));
+    // Loads the items for the dates on screen (repeating items come with their dates)
+    events: async (info, success, failure) => {
+      try {
+        const last = new Date(info.end);
+        last.setDate(last.getDate() - 1);          // info.end is the day after the last visible day
+        await loadItems(isoDate(info.start), isoDate(last));
+        const events = buildEvents();
+        success(events);
+        setTimeout(() => fitWeekHours(events), 0);
+      } catch (err) {
+        failure(err);
+        toast(err.message, true);
+      }
     },
 
     datesSet: (info) => localStorage.setItem('calendarView', info.view.type),
 
-    // Draw a checkbox in front of tasks
+    // Draw a checkbox in front of tasks, a repeat icon on repeating items
     eventContent: (arg) => {
       const item = arg.event.extendedProps.item;
+      const ghost = arg.event.extendedProps.ghost;
       const wrap = document.createElement('div');
       wrap.className = 'ev';
       if (item.type === 'task') {
         const box = document.createElement('span');
         box.className = 'box';
-        box.title = item.done ? 'Mark as not done' : 'Mark as done';
+        box.title = ghost ? 'Comes after you tick the task before it' : (item.done ? 'Mark as not done' : 'Mark as done');
         wrap.appendChild(box);
       } else if (arg.timeText) {
         const time = document.createElement('span');
@@ -815,23 +1298,26 @@ function setupCalendar() {
       title.className = 'title';
       title.textContent = arg.event.title;
       wrap.appendChild(title);
+      if (item.repeat) wrap.appendChild(repeatIcon(item));
       return { domNodes: [wrap] };
     },
 
-    // Click the box to tick it off, anywhere else to open the note
+    // Click the box to tick it off, anywhere else to open the note. Faded copies do nothing.
     eventClick: async (info) => {
       info.jsEvent.preventDefault();
+      if (info.event.extendedProps.ghost) return;
       const item = info.event.extendedProps.item;
       if (info.jsEvent.target.classList.contains('box')) {
         if (await updateItem(item, { done: !item.done })) {
-          calendar.refetchEvents();
+          calendar.refetchEvents();    // a repeating task gets a new line, so load everything again
         }
       } else {
         openNote(item.path);
       }
     },
 
-    // Drag to another day: the date in the markdown file changes too
+    // Drag to another day: the date in the markdown file changes too.
+    // For a repeating item that moves the whole series (the date after 📅).
     eventDrop: async (info) => {
       const item = info.event.extendedProps.item;
       const start = info.event.start;
@@ -840,7 +1326,8 @@ function setupCalendar() {
       if (ok) {
         item.date = isoDate(start);
         item.time = time;
-        toast('Moved to ' + prettyDate(item.date));
+        toast(item.repeat ? 'Series moved to ' + prettyDate(item.date) : 'Moved to ' + prettyDate(item.date));
+        if (item.repeat) calendar.refetchEvents();   // the faded copies move too
       } else {
         info.revert();
       }
@@ -922,6 +1409,7 @@ function taskRow(item) {
   box.addEventListener('change', async () => {
     if (await updateItem(item, { done: box.checked })) {
       li.classList.toggle('done', box.checked);
+      await loadItems();            // a repeating task gets a new line, so load everything again
       setTimeout(renderTasks, 500); // short pause so you can see the tick
     } else {
       box.checked = !box.checked;
@@ -931,6 +1419,7 @@ function taskRow(item) {
   const title = document.createElement('span');
   title.className = 'task-title';
   title.textContent = item.title;
+  if (item.repeat) title.appendChild(repeatIcon(item));
 
   const meta = document.createElement('span');
   meta.className = 'task-meta';
@@ -971,6 +1460,11 @@ document.getElementById('add-cancel').addEventListener('click', () => dialog.clo
 
 addForm.addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (addForm.repeat.value !== 'none' && !addForm.date.value) {
+    toast('Pick a date for a repeating item', true);
+    addForm.date.focus();
+    return;
+  }
   try {
     await api('/api/items', {
       method: 'POST',
@@ -979,6 +1473,7 @@ addForm.addEventListener('submit', async (e) => {
         type: addForm.type.value,
         date: addForm.date.value,
         time: addForm.time.value,
+        repeat: addForm.repeat.value,
       },
     });
     dialog.close();
@@ -1009,7 +1504,6 @@ async function showView(name) {
   if (leavingNotes) await saveNote();
 
   if (name === 'calendar') {
-    await loadItems();
     if (!calendar) setupCalendar();
     else {
       calendar.updateSize();
@@ -1041,6 +1535,24 @@ document.getElementById('menu-toggle').addEventListener('click', () => {
 document.getElementById('scrim').addEventListener('click', () => {
   document.body.classList.remove('menu-open');
 });
+// Tabs: Alt+PageUp / Alt+PageDown switch, Alt+W closes.
+// (Alt+Left/Right would clash with the editor, where they jump to the start/end of a line,
+// and with "back" in the browser. Ctrl+Tab and Ctrl+W belong to the browser.)
+document.addEventListener('keydown', (e) => {
+  if (!e.altKey || e.ctrlKey || e.metaKey || currentView !== 'notes' || tabs.length === 0) return;
+
+  if (e.key === 'PageDown' || e.key === 'PageUp') {
+    e.preventDefault();
+    const step = e.key === 'PageDown' ? 1 : -1;
+    const index = tabs.findIndex((t) => t.path === currentPath);
+    const next = tabs[(index + step + tabs.length) % tabs.length];
+    if (next && next.path !== currentPath) openNote(next.path);
+  } else if (e.code === 'KeyW' && currentPath) {
+    e.preventDefault();
+    closeTab(currentPath);
+  }
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   document.body.classList.remove('menu-open');
@@ -1069,12 +1581,20 @@ async function start() {
   document.body.dataset.view = 'notes';
   loadItems().catch(() => {}); // only for the overdue badge
   await loadNotes();
+
+  // Open tabs from last time (only notes that still exist)
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem('tabs') || '[]'); } catch (err) { /* ignore */ }
   const last = localStorage.getItem('lastNote');
-  const first = notes.find((n) => n.path === last) || notes[0];
+  if (!Array.isArray(saved) || saved.length === 0) saved = last ? [last] : [];
+  tabs = saved.filter((p) => typeof p === 'string' && notes.some((n) => n.path === p)).map((p) => ({ path: p }));
+
+  const first = tabs.find((t) => t.path === last) || tabs[0] || (notes[0] ? { path: notes[0].path } : null);
   if (first) {
-    await openNote(first.path);
+    await openNote(first.path, true);
   } else {
     showNoteEditor(false);
+    renderTabs();
   }
 }
 

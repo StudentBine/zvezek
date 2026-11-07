@@ -74,6 +74,7 @@
 
     <!-- Notes view -->
     <section id="view-notes" class="view active">
+      <div id="tabs" role="tablist" aria-label="Open notes" hidden></div>
       <header class="view-head">
         <input id="note-title" aria-label="Note name" spellcheck="false">
         <span id="save-state"></span>
@@ -149,6 +150,16 @@
         <label>Date <input type="date" name="date"></label>
         <label>Time <input type="time" name="time"></label>
       </div>
+      <label class="repeat-field">Repeat
+        <select name="repeat">
+          <option value="none">Does not repeat</option>
+          <option value="daily">Every day</option>
+          <option value="weekdays">Every weekday</option>
+          <option value="weekly">Every week</option>
+          <option value="monthly">Every month</option>
+          <option value="yearly">Every year</option>
+        </select>
+      </label>
       <div class="actions">
         <button type="button" class="quiet" id="add-cancel">Cancel</button>
         <button type="submit" class="primary">Add</button>
