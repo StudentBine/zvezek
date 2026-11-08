@@ -6,18 +6,24 @@
 //   - [ ] Read chapter 3                  -> task without a date (shows only in the Tasks view)
 //   1. [ ] Hand in report 📅 2026-11-20  -> numbered task (works like "- [ ]", the number stays)
 //
-// Repeating items use the Obsidian Tasks syntax:
+// Repeating items:
 //
-//   - [ ] Water plants 🔁 every week 📅 2026-11-09
-//   - Gym 🔁 every monday, wednesday 📅 2026-11-09 18:00
-//   - Standup 🔁 every weekday until 2026-12-20 📅 2026-11-09 09:30
+//   - [ ] Water plants repeat: every week due:2026-11-09
+//   - Gym repeat: every monday, wednesday due:2026-11-09 18:00
+//   - Standup repeat: every weekday until 2026-12-20 due:2026-11-09 09:30
+//
+// A ticked task gets "done:2026-11-08".
+//
+// Older notes use emoji instead (the Obsidian Tasks way): 📅 2026-11-09, 🔁 every week, ✅ 2026-11-08.
+// Both spellings are read. Everything Zvezek writes uses the text spelling, and when it changes
+// a line that has emoji (ticking, dragging) the whole line is converted (see modernize below).
 
 const TASK_REGEX = /^(\s*)(?:[-*]|\d+[.)]) \[( |x|X)\] (.*)$/;
 const LIST_REGEX = /^(\s*)[-*] (.*)$/;
 const DATE_REGEX = /(?:📅|due:)\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/;
-// "🔁 every week" up to the next marker (📅, due:, ✅ ...) or the end of the line
-const REPEAT_REGEX = /🔁\s*((?:(?!📅|due:|✅|⏳|🛫|➕|❌).)*)/su;
-const DONE_DATE_REGEX = /\s*✅\s*\d{4}-\d{2}-\d{2}/;
+// "repeat: every week" (or "🔁 every week") up to the next marker (due:, done: ...) or the end of the line
+const REPEAT_REGEX = /(?:🔁|\brepeat:)\s*((?:(?!📅|due:|✅|done:|⏳|🛫|➕|❌).)*)/su;
+const DONE_DATE_REGEX = /\s*(?:✅|\bdone:)\s*\d{4}-\d{2}-\d{2}/;
 
 // ================= Dates (plain "YYYY-MM-DD" strings, no time zones) =================
 
@@ -245,6 +251,15 @@ function parseFile(filePath, content) {
 
 // ================= Editing a line =================
 
+// Old emoji spelling -> text spelling:  📅 2026-11-09  ->  due:2026-11-09,
+// 🔁 every week  ->  repeat: every week,  ✅ 2026-11-08  ->  done:2026-11-08
+function modernize(line) {
+  return line
+    .replace(/📅\s*(?=\d{4}-\d{2}-\d{2})/g, 'due:')
+    .replace(/✅\s*(?=\d{4}-\d{2}-\d{2})/g, 'done:')
+    .replace(/🔁\s*/g, 'repeat: ');
+}
+
 // Change the checkbox of a task line
 function setDone(line, done) {
   return line.replace(/\[( |x|X)\]/, done ? '[x]' : '[ ]');
@@ -252,7 +267,8 @@ function setDone(line, done) {
 
 // Change (or add) the date of a line. time can be null.
 function setDate(line, date, time) {
-  let newDate = '📅 ' + date;
+  line = modernize(line);
+  let newDate = 'due:' + date;
   if (time) {
     newDate += ' ' + time;
   }
@@ -268,9 +284,9 @@ function setDate(line, date, time) {
 // directly above the ticked line, which also gets ✅ and today's date.
 function completeTask(line, today) {
   const repeat = repeatOf(line);
-  if (!repeat) return [setDone(line, true)];
+  if (!repeat) return [modernize(setDone(line, true))];
 
-  const done = setDone(line, true).replace(DONE_DATE_REGEX, '').trimEnd() + ' ✅ ' + today;
+  const done = modernize(setDone(line, true)).replace(DONE_DATE_REGEX, '').trimEnd() + ' done:' + today;
   const next = nextDate(repeat.rule, repeat.date);
   if (!next) return [done];                      // the series has ended ("until")
   return [setDate(line, next, repeat.time).replace(DONE_DATE_REGEX, ''), done];
@@ -278,10 +294,10 @@ function completeTask(line, today) {
 
 // Unticking: back to open, and the ✅ date goes away
 function reopenTask(line) {
-  return setDone(line, false).replace(DONE_DATE_REGEX, '');
+  return modernize(setDone(line, false)).replace(DONE_DATE_REGEX, '');
 }
 
 module.exports = {
   parseFile, setDone, setDate, completeTask, reopenTask,
-  parseRepeat, occurrences, nextDate, repeatOf, addDays, isRealDate,
+  parseRepeat, occurrences, nextDate, repeatOf, addDays, isRealDate, modernize,
 };

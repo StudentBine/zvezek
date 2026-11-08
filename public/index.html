@@ -53,6 +53,10 @@
       <button id="select-delete" class="quiet danger">Delete</button>
       <button id="select-clear" class="quiet">Clear</button>
     </div>
+    <button id="open-settings" class="sidebar-link">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg>
+      <span>Settings</span>
+    </button>
   </aside>
 
   <!-- Drag this edge to resize the sidebar; arrow keys work too -->
@@ -167,11 +171,27 @@
     </form>
   </dialog>
 
+  <!-- Settings (saved on the server, so they are the same on every device) -->
+  <dialog id="settings-dialog">
+    <form id="settings-form" method="dialog">
+      <h2>Settings</h2>
+      <label class="check">
+        <input type="checkbox" name="showInbox">
+        <span>Show Inbox in sidebar</span>
+      </label>
+      <p class="hint" id="inbox-hint"></p>
+      <div class="actions">
+        <button type="submit" class="primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" role="status"></div>
 
   <script src="/vendor/easymde/easymde.min.js"></script>
   <script src="/vendor/fullcalendar/index.global.min.js"></script>
   <script src="lists.js"></script>
+  <script src="dates.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

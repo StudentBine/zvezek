@@ -349,6 +349,44 @@ app.get('/api/search', handle(async (req, res) => {
   res.json(results);
 }));
 
+// ---------- Settings ----------
+// Kept in DATA_DIR/.zvezek/settings.json (a hidden folder, so it is not listed as a note),
+// which means they are the same on every device that opens this notes folder.
+
+const SETTINGS_FILE = path.join(DATA_DIR, '.zvezek', 'settings.json');
+const DEFAULT_SETTINGS = { showInbox: true };
+
+async function readSettings() {
+  try {
+    const saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
+    const settings = { ...DEFAULT_SETTINGS };
+    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+      if (typeof saved[key] === typeof DEFAULT_SETTINGS[key]) settings[key] = saved[key];
+    }
+    return settings;
+  } catch (err) {
+    return { ...DEFAULT_SETTINGS };      // no file yet, or it is not valid JSON
+  }
+}
+
+// "inbox" is the name of the inbox note, so the page knows which note to hide
+app.get('/api/settings', handle(async (req, res) => {
+  res.json({ ...(await readSettings()), inbox: INBOX_FILE });
+}));
+
+app.put('/api/settings', handle(async (req, res) => {
+  const settings = await readSettings();
+  const body = req.body || {};
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    if (body[key] === undefined) continue;
+    if (typeof body[key] !== typeof DEFAULT_SETTINGS[key]) throw new Error('Setting "' + key + '" has the wrong type');
+    settings[key] = body[key];
+  }
+  await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
+  await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n');
+  res.json({ ...settings, inbox: INBOX_FILE });
+}));
+
 // ---------- Tasks & events API ----------
 
 // With ?from=YYYY-MM-DD&to=YYYY-MM-DD, repeating items also get "occurrences": the other dates
@@ -396,12 +434,12 @@ app.post('/api/items', handle(async (req, res) => {
 
   let line = req.body.type === 'event' ? '- ' + text : '- [ ] ' + text;
 
-  // Repeat: the Obsidian Tasks text goes before the date ("... 🔁 every week 📅 2026-11-09")
+  // Repeat: the rule goes before the date ("... repeat: every week due:2026-11-09")
   const repeat = req.body.repeat || 'none';
   if (repeat !== 'none') {
     if (!REPEAT_CHOICES[repeat]) throw new Error('Unknown repeat option');
     if (!req.body.date) throw new Error('Pick a date for a repeating item');
-    line += ' 🔁 ' + REPEAT_CHOICES[repeat];
+    line += ' repeat: ' + REPEAT_CHOICES[repeat];
   }
   if (req.body.date) {
     line = setDate(line, req.body.date, req.body.time || null);
@@ -459,12 +497,12 @@ async function start() {
       'Notes are plain markdown files. Link to other notes with [[Inbox]].',
       '',
       '## Tasks',
-      '- [ ] A task with a due date 📅 ' + new Date().toISOString().slice(0, 10),
+      '- [ ] A task with a due date due:' + new Date().toISOString().slice(0, 10),
       '- [ ] A task without a date',
       '- [x] A finished task',
       '',
       '## Events',
-      '- Something happening at a time 📅 ' + new Date().toISOString().slice(0, 10) + ' 18:00',
+      '- Something happening at a time due:' + new Date().toISOString().slice(0, 10) + ' 18:00',
       '',
     ].join('\n'));
   }

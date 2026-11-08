@@ -52,9 +52,9 @@ function isoTime(date) {
   return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
 }
 
+// "Thu 12 Nov" (with the year when it is not this year). The same text is used everywhere (see dates.js).
 function prettyDate(iso) {
-  const date = new Date(iso + 'T00:00');
-  return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  return DateChips.dateText(iso);
 }
 
 // ================= State =================
@@ -69,6 +69,7 @@ let calendar = null;
 let currentView = 'notes';
 let selected = new Set();   // notes ticked in the sidebar (Ctrl/Shift+click)
 let anchorPath = null;      // where a Shift+click range starts
+let settings = { showInbox: true, inbox: 'Inbox.md' };   // saved on the server (see "Settings" below)
 
 // ================= Notes list =================
 
@@ -78,8 +79,13 @@ async function loadNotes() {
   for (const path of Array.from(selected)) {
     if (!entries.some((e) => e.path === path)) selected.delete(path);
   }
-  renderNoteList(entries);
+  renderNoteList(visibleEntries());
   updateSelectBar();
+}
+
+// The sidebar list without the Inbox when "Show Inbox in sidebar" is off (search still finds it)
+function visibleEntries() {
+  return settings.showInbox ? entries : entries.filter((e) => e.path !== settings.inbox);
 }
 
 // Small icons for files that are not notes
@@ -195,7 +201,8 @@ const editor = new EasyMDE({
   tabSize: 4,              // nested lists are indented with 4 spaces
   indentWithTabs: false,
   autoDownloadFontAwesome: false, // icons are served locally from /vendor/font-awesome
-  placeholder: 'Start writing. Add a task with  - [ ] something 📅 2026-11-20',
+  sideBySideFullscreen: false,   // side by side stays inside the page; it never takes over the screen
+  placeholder: 'Start writing. Add a task with  - [ ] something due:2026-11-20',
   // Grouped: text style | lists and tasks | insert | view
   toolbar: [
     'bold', 'italic', 'heading', '|',
@@ -260,7 +267,46 @@ function preparePreview(html) {
     code.parentElement.replaceWith(holder);
   });
 
+  markPreviewDates(box.content);
   return box.innerHTML;
+}
+
+// Dates in list items become quiet chips: "due:2026-11-12 14:00" shows as "Thu 12 Nov, 14:00"
+function markPreviewDates(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  for (const node of nodes) {
+    const parent = node.parentElement;
+    if (!parent || parent.closest('code, pre') || !parent.closest('li')) continue;
+    const found = DateChips.find(node.nodeValue);
+    if (found.length === 0) continue;
+
+    const checkbox = parent.closest('li').querySelector(':scope > input[type=checkbox]');
+    const open = !checkbox || !checkbox.checked;
+    const fragment = document.createDocumentFragment();
+    let at = 0;
+    for (const chip of found) {
+      fragment.append(node.nodeValue.slice(at, chip.from));
+      fragment.append(chipElement(chip, open));
+      at = chip.to;
+    }
+    fragment.append(node.nodeValue.slice(at));
+    node.replaceWith(fragment);
+  }
+}
+
+// One chip: just text. Open tasks that are due today or late get the marigold colour.
+function chipElement(chip, open) {
+  const el = document.createElement('span');
+  el.className = 'date-chip ' + chip.kind;
+  if (chip.kind === 'due' && open) {
+    const state = DateChips.state(chip.date);
+    if (state) el.classList.add(state);
+  }
+  el.textContent = chip.label;
+  return el;
 }
 
 // ---------- Mermaid diagrams ----------
@@ -464,6 +510,108 @@ editor.codemirror.on('change', (cm, change) => {
   saveTimer = setTimeout(saveNote, 800);
 });
 
+// ---------- Dates in the editor ----------
+// Away from the cursor, "due:2026-11-12 14:00" is drawn as the chip "Thu 12 Nov, 14:00".
+// The file is not changed: the chip only hides the text. The line with the cursor shows the real text.
+
+let dateMarks = [];
+
+function markEditorDates(cm) {
+  cm.operation(() => {
+    for (const mark of dateMarks) mark.clear();
+    dateMarks = [];
+
+    const busy = new Set();     // lines with the cursor or a selection
+    for (const sel of cm.listSelections()) {
+      for (let i = sel.from().line; i <= sel.to().line; i++) busy.add(i);
+    }
+
+    let inFence = false;
+    cm.eachLine((handle) => {
+      const text = handle.text;
+      const line = cm.getLineNumber(handle);
+      if (/^\s*(```|~~~)/.test(text)) { inFence = !inFence; return; }
+      if (inFence || busy.has(line)) return;
+      if (!/^\s*(?:[-*]|\d+[.)]) /.test(text)) return;          // only list items, like the parser
+
+      const open = !/^\s*(?:[-*]|\d+[.)]) \[[xX]\]/.test(text);
+      for (const chip of DateChips.find(text)) {
+        dateMarks.push(cm.markText({ line: line, ch: chip.from }, { line: line, ch: chip.to }, {
+          replacedWith: chipElement(chip, open),
+        }));
+      }
+    });
+  });
+}
+
+editor.codemirror.on('cursorActivity', markEditorDates);
+editor.codemirror.on('change', markEditorDates);
+
+// ---------- Closing brackets and quotes ----------
+// ( [ { " ' ` add their partner. With text selected they wrap it. Typing the partner when it is
+// already next to the cursor only moves past it. Backspace right after an opener removes an empty pair.
+
+const Pass = editor.codemirror.constructor.Pass;   // "let the editor handle this key as usual"
+const PAIRS = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
+const QUOTES = ['"', "'", '`'];
+const isWordChar = (c) => /[\p{L}\p{N}_]/u.test(c || '');
+
+function typeCharacter(cm, ch) {
+  if (cm.listSelections().length !== 1) return Pass;
+
+  if (cm.somethingSelected()) {
+    if (!PAIRS[ch]) return Pass;
+    const from = cm.getCursor('from');
+    const text = cm.getSelection();
+    cm.replaceSelection(ch + text + PAIRS[ch], 'around');
+    const to = cm.getCursor('to');
+    // keep the original text selected, inside the new pair
+    cm.setSelection(
+      { line: from.line, ch: from.ch + 1 },
+      { line: to.line, ch: to.ch - 1 });
+    return;
+  }
+
+  const cursor = cm.getCursor();
+  const line = cm.getLine(cursor.line);
+  const before = line.charAt(cursor.ch - 1);
+  const next = line.charAt(cursor.ch);
+
+  // The partner is already there: move past it
+  if (next === ch && (QUOTES.includes(ch) || ch === PAIRS['('] || ch === PAIRS['['] || ch === PAIRS['{'])) {
+    cm.setCursor({ line: cursor.line, ch: cursor.ch + 1 });
+    return;
+  }
+  if (!PAIRS[ch]) return Pass;
+
+  // Not in the middle of a word (don't, it's) and not in front of one
+  if (QUOTES.includes(ch) && isWordChar(before)) return Pass;
+  if (isWordChar(next)) return Pass;
+  // Typing ``` for a code fence: the third backtick comes after two
+  if (ch === '`' && before === '`') return Pass;
+
+  cm.replaceSelection(ch + PAIRS[ch]);
+  cm.setCursor({ line: cursor.line, ch: cursor.ch + 1 });
+}
+
+function backspaceInPair(cm) {
+  if (cm.somethingSelected() || cm.listSelections().length !== 1) return Pass;
+  const cursor = cm.getCursor();
+  const line = cm.getLine(cursor.line);
+  const open = line.charAt(cursor.ch - 1);
+  if (PAIRS[open] && line.charAt(cursor.ch) === PAIRS[open]) {
+    cm.replaceRange('', { line: cursor.line, ch: cursor.ch - 1 }, { line: cursor.line, ch: cursor.ch + 1 });
+    return;
+  }
+  return Pass;
+}
+
+const bracketKeys = { 'Backspace': backspaceInPair };
+for (const ch of Object.keys(PAIRS).concat([')', ']', '}'])) {
+  bracketKeys["'" + ch + "'"] = (cm) => typeCharacter(cm, ch);
+}
+editor.codemirror.addKeyMap(bracketKeys);
+
 // Clicking a [[wiki link]] in preview mode
 document.querySelector('.editor-wrap').addEventListener('click', async (e) => {
   const link = e.target.closest('.wikilink');
@@ -637,7 +785,26 @@ function renderTabs() {
   updateTabDots();
   const active = bar.querySelector('.tab.active');
   if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  bar.scrollTop = 0;                // the strip only ever scrolls sideways
+  updateTabFades();
 }
+
+// The tab strip has no scrollbar. When tabs do not fit, the edge that hides more tabs fades out,
+// and the mouse wheel scrolls it sideways.
+function updateTabFades() {
+  const bar = document.getElementById('tabs');
+  const room = bar.scrollWidth - bar.clientWidth;
+  bar.classList.toggle('fade-left', room > 4 && bar.scrollLeft > 2);
+  bar.classList.toggle('fade-right', room > 4 && bar.scrollLeft < room - 2);
+}
+document.getElementById('tabs').addEventListener('scroll', updateTabFades);
+window.addEventListener('resize', updateTabFades);
+document.getElementById('tabs').addEventListener('wheel', (e) => {
+  const bar = e.currentTarget;
+  if (bar.scrollWidth <= bar.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+  e.preventDefault();               // a normal mouse wheel only goes up and down
+  bar.scrollLeft += e.deltaY;
+}, { passive: false });
 
 // Puts the tab "path" before or after the tab "targetPath"
 function moveTab(path, targetPath, after) {
@@ -683,7 +850,7 @@ function showNothingOpen() {
   setSaveState('');
   showNoteEditor(false);
   renderTabs();
-  renderNoteList(entries);
+  renderNoteList(visibleEntries());
   saveTabs();
 }
 
@@ -745,7 +912,7 @@ async function openNote(path, quiet = false) {
 
     renderTabs();
     saveTabs();
-    renderNoteList(entries);
+    renderNoteList(visibleEntries());
     document.body.classList.remove('menu-open');
   } catch (err) {
     toast(err.message, true);
@@ -1127,7 +1294,7 @@ document.getElementById('search').addEventListener('input', (e) => {
   const q = e.target.value.trim();
   searchTimer = setTimeout(async () => {
     if (q.length < 2) {
-      renderNoteList(notes);
+      renderNoteList(visibleEntries());
       return;
     }
     const results = await api('/api/search?q=' + encodeURIComponent(q));
@@ -1179,13 +1346,9 @@ async function refreshItems() {
 
 // ---------- Calendar ----------
 
-// Small "repeat" arrows with the rule as tooltip
-function repeatIcon(item) {
-  const icon = document.createElement('span');
-  icon.className = 'repeat-icon';
-  icon.title = 'Repeats: ' + item.repeat.text + (item.repeat.until ? ' until ' + item.repeat.until : '');
-  icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l3 3-3 3"/><path d="M4 11V9a3 3 0 0 1 3-3h13"/><path d="M7 21l-3-3 3-3"/><path d="M20 13v2a3 3 0 0 1-3 3H4"/></svg>';
-  return icon;
+// "every week" or "every week until 2026-12-20", for tooltips and the Tasks view
+function repeatText(item) {
+  return item.repeat.text + (item.repeat.until ? ' until ' + prettyDate(item.repeat.until) : '');
 }
 
 function eventStart(item, date) {
@@ -1277,12 +1440,13 @@ function setupCalendar() {
 
     datesSet: (info) => localStorage.setItem('calendarView', info.view.type),
 
-    // Draw a checkbox in front of tasks, a repeat icon on repeating items
+    // Tasks get a round checkbox, events show their time in bold. Repeating items say so in the tooltip.
     eventContent: (arg) => {
       const item = arg.event.extendedProps.item;
       const ghost = arg.event.extendedProps.ghost;
       const wrap = document.createElement('div');
       wrap.className = 'ev';
+      if (item.repeat) wrap.title = 'Repeats ' + repeatText(item);
       if (item.type === 'task') {
         const box = document.createElement('span');
         box.className = 'box';
@@ -1298,7 +1462,6 @@ function setupCalendar() {
       title.className = 'title';
       title.textContent = arg.event.title;
       wrap.appendChild(title);
-      if (item.repeat) wrap.appendChild(repeatIcon(item));
       return { domNodes: [wrap] };
     },
 
@@ -1317,7 +1480,7 @@ function setupCalendar() {
     },
 
     // Drag to another day: the date in the markdown file changes too.
-    // For a repeating item that moves the whole series (the date after 📅).
+    // For a repeating item that moves the whole series (the due: date).
     eventDrop: async (info) => {
       const item = info.event.extendedProps.item;
       const start = info.event.start;
@@ -1419,14 +1582,19 @@ function taskRow(item) {
   const title = document.createElement('span');
   title.className = 'task-title';
   title.textContent = item.title;
-  if (item.repeat) title.appendChild(repeatIcon(item));
 
   const meta = document.createElement('span');
   meta.className = 'task-meta';
+  if (item.repeat) {
+    const repeats = document.createElement('span');
+    repeats.className = 'repeat-text';
+    repeats.textContent = 'repeats ' + repeatText(item);
+    meta.appendChild(repeats);
+  }
   if (item.date) {
     const date = document.createElement('span');
     date.className = 'chip';
-    date.textContent = prettyDate(item.date) + (item.time ? ' ' + item.time : '');
+    date.textContent = DateChips.dueText(item.date, item.time);
     meta.appendChild(date);
   }
   const link = document.createElement('button');
@@ -1575,10 +1743,36 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ================= Settings =================
+
+const settingsDialog = document.getElementById('settings-dialog');
+const settingsForm = document.getElementById('settings-form');
+
+document.getElementById('open-settings').addEventListener('click', () => {
+  settingsForm.showInbox.checked = settings.showInbox;
+  document.getElementById('inbox-hint').textContent = 'Quick add still writes to ' + settings.inbox
+    + '. When it is hidden here, you can still find it with search.';
+  settingsDialog.showModal();
+  document.body.classList.remove('menu-open');
+});
+
+// Saved as soon as the box is clicked
+settingsForm.showInbox.addEventListener('change', async () => {
+  const wanted = settingsForm.showInbox.checked;
+  try {
+    settings = await api('/api/settings', { method: 'PUT', body: { showInbox: wanted } });
+    renderNoteList(visibleEntries());
+  } catch (err) {
+    settingsForm.showInbox.checked = settings.showInbox;
+    toast(err.message, true);
+  }
+});
+
 // ================= Start =================
 
 async function start() {
   document.body.dataset.view = 'notes';
+  settings = await api('/api/settings').catch(() => settings);
   loadItems().catch(() => {}); // only for the overdue badge
   await loadNotes();
 

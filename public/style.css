@@ -591,9 +591,20 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
   gap: 2px;
   margin-bottom: -8px;
   border-bottom: 1px solid var(--mist);
+  /* Scrolls with the wheel or trackpad when the tabs do not fit, but never shows a scrollbar */
   overflow-x: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--mist) transparent;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+#tabs::-webkit-scrollbar { display: none; }
+
+/* A soft edge on the side that hides more tabs (set by updateTabFades in app.js) */
+#tabs.fade-left { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px); mask-image: linear-gradient(to right, transparent, #000 28px); }
+#tabs.fade-right { -webkit-mask-image: linear-gradient(to left, transparent, #000 28px); mask-image: linear-gradient(to left, transparent, #000 28px); }
+#tabs.fade-left.fade-right {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
 }
 
 #tabs[hidden] { display: none; }
@@ -708,6 +719,18 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 }
 
 .editor-wrap .EasyMDEContainer:focus-within { border-color: var(--pine-light); }
+
+/* Side by side: toolbar on top, writing area and preview next to each other, inside the card.
+   (EasyMDE's own rules for this expect a block layout, so they are replaced with a grid.) */
+.editor-wrap .EasyMDEContainer.sided--no-fullscreen {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.sided--no-fullscreen .editor-toolbar { grid-column: 1 / -1; width: auto; }
+.sided--no-fullscreen .CodeMirror-sided { width: auto !important; height: 100%; min-height: 0; border-right: 1px solid var(--mist) !important; }
+.sided--no-fullscreen .editor-preview-side { position: static; width: auto; min-height: 0; height: 100%; border: 0; }
 
 .editor-toolbar {
   display: flex;
@@ -1076,18 +1099,20 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 .ev .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ev .time { font-weight: 600; flex-shrink: 0; }
 
-/* Event = moss bar on the left */
+/* Event = a flat tint, and its time in bold. Task = no background, a round checkbox in front. */
 .fc-event.event .ev {
   background: var(--moss-soft);
   color: var(--granite);
-  box-shadow: inset 3px 0 0 var(--moss);
 }
 
-/* Task = pine tint with a round checkbox */
 .fc-event.task .ev {
-  background: var(--pine-light);
+  background: transparent;
   color: var(--granite);
 }
+
+.fc-event.task:hover .ev { background: var(--snow); }
+
+.ev .time { font-weight: 700; }
 
 .ev .box {
   flex-shrink: 0;
@@ -1112,33 +1137,14 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
   .fc-event.task.done .box { background: var(--moss); border-color: var(--moss); }
 }
 
-.fc-event.task.overdue .ev {
-  background: var(--marigold-soft);
-  color: var(--marigold-ink);
-  box-shadow: inset 0 0 0 1px var(--marigold);
-}
-
+/* Overdue: only the text turns marigold, no box */
+.fc-event.task.overdue .ev { color: var(--marigold-ink); }
 .fc-event.task.overdue .box { border-color: var(--marigold); }
 
 /* Later dates of a repeating item: faded, nothing happens on click */
 .fc-event.ghost { opacity: 0.5; cursor: default; }
 .fc-event.ghost .box { cursor: default; }
 .fc-event.ghost .box:hover { background: var(--paper); }
-
-.repeat-icon { display: inline-flex; flex-shrink: 0; margin-left: auto; padding-left: 4px; }
-
-.repeat-icon svg {
-  width: 12px;
-  height: 12px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.7;
-}
-
-.task-title .repeat-icon { display: inline-flex; margin-left: 0; padding-left: 8px; vertical-align: -1px; color: var(--stone); }
 
 .fc-timegrid-event .ev { height: 100%; align-items: flex-start; }
 .fc .fc-timegrid-slot-label-cushion,
@@ -1227,15 +1233,15 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
   flex-shrink: 0;
 }
 
+/* Dates: quiet text, no pill */
 .chip {
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--moss-soft);
-  color: var(--granite);
-  font-size: 12px;
-  font-weight: 600;
+  color: var(--stone);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+.repeat-text { color: var(--stone); font-size: 12px; white-space: nowrap; }
 
 .from-note {
   padding: 2px 4px;
@@ -1251,10 +1257,62 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 .from-note:hover { color: var(--granite); text-decoration-color: var(--stone); }
 
 .task-group.overdue h2 { color: var(--marigold-ink); }
-.task-group.overdue ul { border-color: var(--marigold); }
-.task-group.overdue .chip { background: var(--marigold); color: #2E2208; }
+.task-group.overdue .chip,
+.task-group.today .chip { color: var(--marigold-ink); font-weight: 600; }
 .task-group.today h2 { color: var(--marigold-ink); }
-.task-group.today .chip { background: var(--marigold-soft); color: var(--marigold-ink); }
+
+/* ================= Date chips in the editor and the preview ================= */
+
+.date-chip {
+  margin: 0 1px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--moss-soft);
+  color: var(--stone);
+  font-family: "Bricolage Grotesque", system-ui, sans-serif;
+  font-size: 0.86em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* repeat and done are even quieter: plain small text, no tint */
+.date-chip.repeat, .date-chip.done { background: transparent; padding: 0 3px; }
+.date-chip.due.today, .date-chip.due.overdue { background: var(--marigold-soft); color: var(--marigold-ink); font-weight: 600; }
+
+/* ================= Settings link in the sidebar ================= */
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--side-dim);
+  font-size: 14px;
+  text-align: left;
+}
+
+.sidebar-link svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.sidebar-link:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+
+dialog label.check { flex-direction: row; align-items: center; gap: 10px; margin-bottom: 6px; font-size: 15px; font-weight: 500; color: var(--granite); cursor: pointer; }
+dialog label.check input { width: 18px; height: 18px; accent-color: var(--pine); }
+dialog .hint { margin: 0 0 4px 28px; font-size: 13px; color: var(--stone); }
+
+/* The browser draws a small calendar and clock icon in date and time fields. They are made
+   invisible but stay clickable (the whole field opens the picker). */
+dialog input[type="date"], dialog input[type="time"] { position: relative; }
+dialog input[type="date"]::-webkit-calendar-picker-indicator,
+dialog input[type="time"]::-webkit-calendar-picker-indicator {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  opacity: 0;
+  cursor: pointer;
+}
 
 /* ================= Dialog ================= */
 
