@@ -69,7 +69,7 @@ let calendar = null;
 let currentView = 'notes';
 let selected = new Set();   // notes ticked in the sidebar (Ctrl/Shift+click)
 let anchorPath = null;      // where a Shift+click range starts
-let settings = { showInbox: true, inbox: 'Inbox.md' };   // saved on the server (see "Settings" below)
+let settings = { showInbox: true, inbox: 'Inbox.md', livePreview: true, maxFileMB: 25, categories: [], palette: [] };   // saved on the server (see "Settings" below)
 
 // ================= Notes list =================
 
@@ -117,9 +117,11 @@ function fileLink(file) {
       e.preventDefault();          // selecting, not opening
       onNoteClick(e, file.path);
     } else {
-      selected.clear();            // plain click: the browser opens the file in a new tab
+      e.preventDefault();          // plain click: open it in a Zvezek tab
+      selected.clear();
       anchorPath = file.path;
       updateSelectBar();
+      openFile(file.path);
     }
   });
   return link;
@@ -547,6 +549,137 @@ function markEditorDates(cm) {
 editor.codemirror.on('cursorActivity', markEditorDates);
 editor.codemirror.on('change', markEditorDates);
 
+// ---------- Live preview ----------
+// Away from the cursor, the marks of bold, italic, strikethrough, `code`, headings (#) and quotes (>)
+// are hidden, and the text keeps its look. The line with the cursor shows everything again.
+// Only the lines that changed, and the lines the cursor left or entered, are touched.
+
+const LIVE_PATTERNS = [
+  { re: /\*\*(?=\S)(.+?)(?<=\S)\*\*/gu, n: 2 },                                                        // **bold**
+  { re: /(?<![\p{L}\p{N}_])__(?=\S)(.+?)(?<=\S)__(?![\p{L}\p{N}_])/gu, n: 2 },                      // __bold__
+  { re: /~~(?=\S)(.+?)(?<=\S)~~/gu, n: 2 },                                                           // ~~strikethrough~~
+  { re: /(?<![*\w])\*(?![*\s])(.+?)(?<![*\s])\*(?!\*)/gu, n: 1 },                                    // *italic*
+  { re: /(?<![\p{L}\p{N}_])_(?![_\s])(.+?)(?<![_\s])_(?![\p{L}\p{N}_])/gu, n: 1 },                  // _italic_
+];
+
+// The [from, to] ranges of one line that can be hidden
+function liveRanges(text) {
+  if (!/[*_~`#>]/.test(text)) return [];     // most lines: nothing to do
+  const out = [];
+  const taken = [];                           // hidden ranges must never overlap
+  const free = (from, to) => !taken.some((r) => from < r[1] && to > r[0]);
+  const hide = (from, to) => { if (free(from, to)) { out.push([from, to]); taken.push([from, to]); return true; } return false; };
+
+  let m = text.match(/^#{1,6} /);
+  if (m) hide(0, m[0].length);
+  m = text.match(/^\s*(?:> ?)+/);
+  if (m) hide(m[0].indexOf('>'), m[0].length);
+
+  // `code`: the backticks go, and nothing inside is touched
+  const code = [];
+  for (const c of text.matchAll(/(`+)(.+?)\1/g)) {
+    const from = c.index;
+    const to = from + c[0].length;
+    code.push([from, to]);
+    hide(from, from + c[1].length);
+    hide(to - c[1].length, to);
+  }
+  const inCode = (from, to) => code.some((r) => from < r[1] && to > r[0]);
+
+  for (const { re, n } of LIVE_PATTERNS) {
+    for (const c of text.matchAll(re)) {
+      const from = c.index;
+      const to = from + c[0].length;
+      if (inCode(from, from + n) || inCode(to - n, to)) continue;
+      if (free(from, from + n) && free(to - n, to)) { hide(from, from + n); hide(to - n, to); }
+    }
+  }
+  return out.sort((a, b) => a[0] - b[0]);
+}
+
+const liveMarks = new Map();    // line -> its marks
+let liveBusy = [];              // lines that had the cursor last time
+let liveFence = new Set();      // line numbers inside a ``` block (nothing is hidden there)
+
+function liveFenceLines(cm) {
+  const lines = new Set();
+  let inside = false;
+  let n = 0;
+  cm.eachLine((handle) => {
+    if (/^\s*(```|~~~)/.test(handle.text)) { inside = !inside; lines.add(n); }
+    else if (inside) lines.add(n);
+    n++;
+  });
+  return lines;
+}
+
+function liveBusyLines(cm) {
+  const busy = new Set();
+  for (const sel of cm.listSelections()) {
+    for (let i = sel.from().line; i <= sel.to().line; i++) busy.add(i);
+  }
+  return busy;
+}
+
+function liveLine(cm, n, busy) {
+  const handle = cm.getLineHandle(n);
+  if (!handle) return;
+  const old = liveMarks.get(handle);
+  if (old) { old.forEach((mark) => mark.clear()); liveMarks.delete(handle); }
+  if (!settings.livePreview || busy.has(n) || liveFence.has(n)) return;
+  const marks = liveRanges(handle.text).map((r) => cm.markText({ line: n, ch: r[0] }, { line: n, ch: r[1] }, { collapsed: true }));
+  if (marks.length) liveMarks.set(handle, marks);
+}
+
+function liveAll(cm) {
+  cm.operation(() => {
+    liveMarks.forEach((marks) => marks.forEach((mark) => mark.clear()));
+    liveMarks.clear();
+    liveFence = liveFenceLines(cm);
+    const busy = liveBusyLines(cm);
+    if (settings.livePreview) for (let n = 0; n < cm.lineCount(); n++) liveLine(cm, n, busy);
+    liveBusy = Array.from(busy).map((n) => cm.getLineHandle(n));
+  });
+}
+
+function updateLivePreview() { liveAll(editor.codemirror); }
+
+editor.codemirror.on('changes', (cm, changes) => {
+  if (!settings.livePreview) return;
+  const isFence = (text) => /^\s*(```|~~~)/.test(text);
+  let all = changes.length > 1;
+  for (const c of changes) {
+    if (c.text.length > 50 || c.removed.length > 50) all = true;             // a note was loaded or pasted
+    if (c.removed.some(isFence)) all = true;
+    for (let i = 0; i < c.text.length && !all; i++) if (isFence(cm.getLine(c.from.line + i) || '')) all = true;
+  }
+  if (all) { liveAll(cm); return; }
+
+  cm.operation(() => {
+    liveFence = liveFenceLines(cm);
+    const busy = liveBusyLines(cm);
+    const c = changes[0];
+    for (let n = c.from.line; n < c.from.line + c.text.length; n++) liveLine(cm, n, busy);
+    liveBusy = Array.from(busy).map((n) => cm.getLineHandle(n));
+  });
+});
+
+editor.codemirror.on('cursorActivity', (cm) => {
+  if (!settings.livePreview) return;
+  const busy = liveBusyLines(cm);
+  const handles = Array.from(busy).map((n) => cm.getLineHandle(n));
+  const same = handles.length === liveBusy.length && handles.every((h, i) => h === liveBusy[i]);
+  if (same) return;
+  cm.operation(() => {
+    for (const handle of liveBusy) {               // lines the cursor left
+      const n = cm.getLineNumber(handle);
+      if (n !== null) liveLine(cm, n, busy);
+    }
+    for (const n of busy) liveLine(cm, n, busy);    // lines it entered
+    liveBusy = handles;
+  });
+});
+
 // ---------- Closing brackets and quotes ----------
 // ( [ { " ' ` add their partner. With text selected they wrap it. Typing the partner when it is
 // already next to the cursor only moves past it. Backspace right after an opener removes an empty pair.
@@ -656,7 +789,11 @@ async function saveNote() {
 // Every open note is a tab. There is still only one editor: switching tabs saves the note,
 // loads the other one and puts the cursor and scroll position back where they were.
 
-let tabs = [];   // [{ path, cursor, scroll }] in the order shown
+let tabs = [];   // [{ path, cursor, scroll, file }] in the order shown. file: true = not a note (shown in the viewer)
+let currentFile = null;   // path of the file open in the viewer (then currentPath is null)
+
+const activePath = () => currentPath || currentFile;
+const openTab = (tab) => (tab.file ? openFile(tab.path) : openNote(tab.path));
 
 function tabFor(path) {
   return tabs.find((t) => t.path === path);
@@ -706,10 +843,10 @@ function renderTabs() {
 
   for (const tab of tabs) {
     const el = document.createElement('div');
-    el.className = 'tab' + (tab.path === currentPath ? ' active' : '');
+    el.className = 'tab' + (tab.path === activePath() ? ' active' : '');
     el.dataset.path = tab.path;
     el.setAttribute('role', 'tab');
-    el.setAttribute('aria-selected', tab.path === currentPath ? 'true' : 'false');
+    el.setAttribute('aria-selected', tab.path === activePath() ? 'true' : 'false');
     el.tabIndex = 0;
     el.draggable = true;
     el.title = tab.path.replace(/\.md$/, '');
@@ -729,12 +866,12 @@ function renderTabs() {
 
     el.addEventListener('click', (e) => {
       if (e.target.closest('.tab-close')) return;
-      if (tab.path !== currentPath) openNote(tab.path);
+      if (tab.path !== activePath()) openTab(tab);
     });
     el.addEventListener('keydown', (e) => {
       if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
         e.preventDefault();
-        if (tab.path !== currentPath) openNote(tab.path);
+        if (tab.path !== activePath()) openTab(tab);
       }
     });
     close.addEventListener('click', (e) => {
@@ -822,7 +959,7 @@ async function closeTab(path) {
   const index = tabs.findIndex((t) => t.path === path);
   if (index === -1) return;
 
-  if (path !== currentPath) {
+  if (path !== activePath()) {
     tabs.splice(index, 1);
     saveTabs();
     renderTabs();
@@ -836,7 +973,7 @@ async function closeTab(path) {
   const next = tabs[index] || tabs[index - 1];
   if (next) {
     dirty = false;
-    await openNote(next.path);
+    await openTab(next);
   } else {
     showNothingOpen();
   }
@@ -845,6 +982,7 @@ async function closeTab(path) {
 // No tab left: back to the empty state
 function showNothingOpen() {
   currentPath = null;
+  currentFile = null;
   dirty = false;
   clearTimeout(saveTimer);
   setSaveState('');
@@ -857,8 +995,8 @@ function showNothingOpen() {
 // Notes were deleted (here or from the multi-select): close their tabs, no saving
 async function forgetNotes(paths) {
   const gone = new Set(paths);
-  const wasOpen = currentPath && gone.has(currentPath);
-  const index = tabs.findIndex((t) => t.path === currentPath);
+  const wasOpen = activePath() && gone.has(activePath());
+  const index = tabs.findIndex((t) => t.path === activePath());
 
   tabs = tabs.filter((t) => !gone.has(t.path));
   if (!wasOpen) {
@@ -869,7 +1007,7 @@ async function forgetNotes(paths) {
   dirty = false;
   clearTimeout(saveTimer);
   const next = tabs[Math.min(index, tabs.length - 1)];
-  if (next) await openNote(next.path);
+  if (next) await openTab(next);
   else showNothingOpen();
 }
 
@@ -882,6 +1020,10 @@ function renameTabs(changes) {
     currentPath = changes[currentPath];
     document.getElementById('note-title').value = currentPath.replace(/\.md$/, '');
   }
+  if (currentFile && changes[currentFile]) {
+    currentFile = changes[currentFile];
+    showFileViewer(currentFile);
+  }
   saveTabs();
   renderTabs();
 }
@@ -893,6 +1035,7 @@ async function openNote(path, quiet = false) {
   try {
     const data = await api('/api/note?path=' + encodeURIComponent(path));
     currentPath = path;
+    currentFile = null;
     if (!tabFor(path)) tabs.push({ path: path });
     const tab = tabFor(path);
 
@@ -942,10 +1085,159 @@ async function reloadOpenNote() {
 }
 
 function showNoteEditor(show) {
+  document.getElementById('file-viewer').hidden = true;
   document.querySelector('#view-notes .view-head').hidden = !show;
   document.querySelector('.editor-wrap').hidden = !show;
   document.getElementById('empty-notes').hidden = show;
   if (show) editor.codemirror.refresh();
+}
+
+// ---------- Files that are not notes: opened in a tab with a small viewer ----------
+
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|svg)$/i;
+const TEXT_FILE = /\.(txt|log|json|csv|tsv|js|mjs|ts|py|css|html?|xml|ya?ml|toml|ini|conf|cfg|sh|sql|java|c|h|cpp|go|rs|rb|php|diff|patch)$/i;
+let fileToken = 0;   // so a slow file does not show up after you moved to another tab
+
+async function openFile(path) {
+  await saveNote();
+  rememberTab();
+  currentPath = null;
+  currentFile = path;
+  dirty = false;
+  clearTimeout(saveTimer);
+  setSaveState('');
+  if (!tabFor(path)) tabs.push({ path: path, file: true });
+  showView('notes');
+  showFileViewer(path);
+  renderTabs();
+  saveTabs();
+  renderNoteList(visibleEntries());
+  document.body.classList.remove('menu-open');
+}
+
+// A simple CSV reader: quotes may hold the separator and line breaks
+function parseCsv(text, separator) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cell += c;
+    } else if (c === '"') quoted = true;
+    else if (c === separator) { row.push(cell); cell = ''; }
+    else if (c === '\n') { row.push(cell.replace(/\r$/, '')); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+async function showFileViewer(path) {
+  document.querySelector('#view-notes .view-head').hidden = true;
+  document.querySelector('.editor-wrap').hidden = true;
+  document.getElementById('empty-notes').hidden = true;
+  document.getElementById('file-viewer').hidden = false;
+
+  const entry = entries.find((e) => e.path === path);
+  const size = entry ? entry.size : 0;
+  const name = path.split('/').pop();
+  const url = '/files/' + path.split('/').map(encodeURIComponent).join('/');
+  const ext = name.includes('.') ? name.split('.').pop().toUpperCase() : '';
+  const token = ++fileToken;
+
+  document.getElementById('file-name').textContent = name;
+  document.getElementById('file-info').textContent = prettySize(size);
+  const download = document.getElementById('file-download');
+  download.href = url;
+  download.setAttribute('download', name);
+
+  const body = document.getElementById('file-body');
+  body.innerHTML = '';
+  body.scrollTop = 0;
+
+  const tooBig = size > settings.maxFileMB * 1024 * 1024;
+  const isPdf = /\.pdf$/i.test(name);
+  const isImage = IMAGE_FILE.test(name);
+  const isText = TEXT_FILE.test(name);
+
+  if (tooBig || !(isPdf || isImage || isText)) {
+    const card = document.createElement('div');
+    card.className = 'file-card';
+    const title = document.createElement('h2');
+    title.textContent = name;
+    const type = document.createElement('p');
+    type.textContent = (ext ? ext + ' file' : 'File') + ', ' + prettySize(size);
+    card.append(title, type);
+    if (tooBig) {
+      const why = document.createElement('p');
+      why.textContent = 'Bigger than the ' + settings.maxFileMB + ' MB limit for viewing (see Settings).';
+      card.appendChild(why);
+    }
+    const link = document.createElement('a');
+    link.className = 'primary';
+    link.href = url;
+    link.setAttribute('download', name);
+    link.textContent = 'Download';
+    card.appendChild(link);
+    body.appendChild(card);
+  } else if (isImage) {
+    const box = document.createElement('div');
+    box.className = 'image-box';
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = name;
+    img.title = 'Click to zoom';
+    img.addEventListener('click', () => img.classList.toggle('zoomed'));
+    box.appendChild(img);
+    body.appendChild(box);
+  } else if (isPdf) {
+    // The browser's own PDF viewer. /files does not send the sandbox header for PDFs, so this works.
+    const frame = document.createElement('iframe');
+    frame.src = url;
+    frame.title = name;
+    body.appendChild(frame);
+  } else {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Could not read the file');
+      let text = await res.text();
+      if (token !== fileToken) return;
+      const cut = text.length > 1000000;
+      if (cut) text = text.slice(0, 1000000);
+
+      if (/\.(csv|tsv)$/i.test(name)) {
+        const rows = parseCsv(text, /\.tsv$/i.test(name) ? '\t' : ',');
+        const table = document.createElement('table');
+        for (const row of rows.slice(0, 2000)) {
+          const tr = table.insertRow();
+          for (const value of row) tr.insertCell().textContent = value;
+        }
+        const wrap = document.createElement('div');
+        wrap.className = 'table-wrap';
+        wrap.appendChild(table);
+        body.appendChild(wrap);
+        if (rows.length > 2000) addFileNote(body, 'Showing the first 2000 rows.');
+      } else {
+        const pre = document.createElement('pre');
+        pre.textContent = text;
+        body.appendChild(pre);
+      }
+      if (cut) addFileNote(body, 'Showing the first 1 MB. Download the file to see all of it.');
+    } catch (err) {
+      body.textContent = err.message;
+    }
+  }
+}
+
+function addFileNote(body, text) {
+  const p = document.createElement('div');
+  p.className = 'file-note';
+  p.textContent = text;
+  body.appendChild(p);
 }
 
 async function createNote(path) {
@@ -1306,6 +1598,59 @@ document.getElementById('search').addEventListener('input', (e) => {
 
 // ================= Tasks & events =================
 
+// ---------- Categories (a #tag on the line, colours from Settings) ----------
+
+function categoryOf(name) {
+  if (!name) return null;
+  return settings.categories.find((c) => c.name.toLowerCase() === name.toLowerCase()) || null;
+}
+
+// "cat-lake" for a task in the "kolokvij" category, or '' (no category, or one that is not in Settings)
+function categoryClass(name) {
+  const category = categoryOf(name);
+  return category ? 'cat-' + category.color : '';
+}
+
+// Fills a <select> with "No category" and the categories of Settings (plus the item's own, if it is not listed)
+function fillCategorySelect(select, current) {
+  select.innerHTML = '';
+  select.add(new Option('No category', ''));
+  for (const c of settings.categories) select.add(new Option(c.name, c.name));
+  if (current && !categoryOf(current)) select.add(new Option(current, current));
+  select.value = current ? (categoryOf(current) ? categoryOf(current).name : current) : '';
+}
+
+// The calendar can hide categories. The choice is remembered ('' stands for "no category").
+function hiddenCategories() {
+  try { return new Set(JSON.parse(localStorage.getItem('hiddenCategories') || '[]')); } catch (err) { return new Set(); }
+}
+
+function renderCategoryFilter() {
+  const box = document.getElementById('cat-filter');
+  box.innerHTML = '';
+  box.hidden = settings.categories.length === 0;
+  const hidden = hiddenCategories();
+
+  const entries = settings.categories.map((c) => ({ key: c.name.toLowerCase(), label: c.name, cls: 'cat-' + c.color }))
+    .concat([{ key: '', label: 'No category', cls: '' }]);
+  for (const entry of entries) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cat-toggle ' + entry.cls + (hidden.has(entry.key) ? ' off' : '');
+    button.setAttribute('aria-pressed', hidden.has(entry.key) ? 'false' : 'true');
+    button.innerHTML = '<span class="cat-dot"></span>';
+    button.append(entry.label);
+    button.addEventListener('click', () => {
+      const now = hiddenCategories();
+      if (now.has(entry.key)) now.delete(entry.key); else now.add(entry.key);
+      try { localStorage.setItem('hiddenCategories', JSON.stringify(Array.from(now))); } catch (err) { /* not remembered */ }
+      renderCategoryFilter();
+      if (calendar) calendar.refetchEvents();
+    });
+    box.appendChild(button);
+  }
+}
+
 // Without a range: all tasks and events. With a range (YYYY-MM-DD): repeating items also come
 // with "occurrences", the other dates of their series inside that range.
 async function loadItems(from, to) {
@@ -1385,8 +1730,10 @@ function ghostEvent(item, index, date) {
 
 function buildEvents() {
   const events = [];
+  const hidden = hiddenCategories();
   items.forEach((item, index) => {
     if (!item.date) return;
+    if (settings.categories.length && hidden.has((item.category || '').toLowerCase())) return;
     events.push(itemToEvent(item, index));
     for (const date of item.occurrences || []) events.push(ghostEvent(item, index, date));
   });
@@ -1447,6 +1794,8 @@ function setupCalendar() {
       const wrap = document.createElement('div');
       wrap.className = 'ev';
       if (item.repeat) wrap.title = 'Repeats ' + repeatText(item);
+      const cls = categoryClass(item.category);
+      if (cls) wrap.classList.add('cat', cls);
       if (item.type === 'task') {
         const box = document.createElement('span');
         box.className = 'box';
@@ -1475,7 +1824,7 @@ function setupCalendar() {
           calendar.refetchEvents();    // a repeating task gets a new line, so load everything again
         }
       } else {
-        openNote(item.path);
+        openPopover(item, info.el);
       }
     },
 
@@ -1508,25 +1857,47 @@ function setupCalendar() {
 function renderTasks() {
   const today = isoDate(new Date());
   const inAWeek = isoDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+  const mode = localStorage.getItem('taskGroup') === 'category' ? 'category' : 'date';
+  document.querySelectorAll('#task-group-switch button').forEach((b) => b.classList.toggle('active', b.dataset.group === mode));
 
-  const groups = [
-    { name: 'Overdue', className: 'overdue', list: [] },
-    { name: 'Today', className: 'today', list: [] },
-    { name: 'Next 7 days', className: '', list: [] },
-    { name: 'Later', className: '', list: [] },
-    { name: 'No date', className: '', list: [] },
-    { name: 'Done', className: 'done-group', list: [] },
-  ];
+  const done = { name: 'Done', className: 'done-group', list: [] };
+  let groups;
 
-  for (const item of items) {
-    if (item.type !== 'task') continue;
-    if (item.done) groups[5].list.push(item);
-    else if (!item.date) groups[4].list.push(item);
-    else if (item.date < today) groups[0].list.push(item);
-    else if (item.date === today) groups[1].list.push(item);
-    else if (item.date <= inAWeek) groups[2].list.push(item);
-    else groups[3].list.push(item);
+  if (mode === 'date') {
+    groups = [
+      { name: 'Overdue', className: 'overdue', list: [] },
+      { name: 'Today', className: 'today', list: [] },
+      { name: 'Next 7 days', className: '', list: [] },
+      { name: 'Later', className: '', list: [] },
+      { name: 'No date', className: '', list: [] },
+    ];
+    for (const item of items) {
+      if (item.type !== 'task') continue;
+      if (item.done) done.list.push(item);
+      else if (!item.date) groups[4].list.push(item);
+      else if (item.date < today) groups[0].list.push(item);
+      else if (item.date === today) groups[1].list.push(item);
+      else if (item.date <= inAWeek) groups[2].list.push(item);
+      else groups[3].list.push(item);
+    }
+  } else {
+    // One group per category, in the order of Settings. Tags that are not in Settings come after them.
+    groups = settings.categories.map((c) => ({ name: c.name, className: '', cat: 'cat-' + c.color, key: c.name.toLowerCase(), list: [] }));
+    const none = { name: 'No category', className: '', key: '', list: [] };
+    for (const item of items) {
+      if (item.type !== 'task') continue;
+      if (item.done) { done.list.push(item); continue; }
+      const key = (item.category || '').toLowerCase();
+      let group = groups.find((g) => g.key === key);
+      if (!group && key) {
+        group = { name: item.category, className: '', key: key, list: [] };
+        groups.push(group);
+      }
+      (group || none).list.push(item);
+    }
+    groups.push(none);
   }
+  groups.push(done);
 
   const container = document.getElementById('task-groups');
   container.innerHTML = '';
@@ -1535,13 +1906,21 @@ function renderTasks() {
   for (const group of groups) {
     if (group.list.length === 0) continue;
     total += group.list.length;
-    group.list.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    group.list.sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'));
 
     const section = document.createElement(group.name === 'Done' ? 'details' : 'section');
     section.className = 'task-group ' + group.className;
 
     const heading = document.createElement(group.name === 'Done' ? 'summary' : 'h2');
-    heading.innerHTML = group.name + ' <span class="count">' + group.list.length + '</span>';
+    if (group.cat) {
+      heading.classList.add(group.cat);
+      heading.innerHTML = '<span class="cat-dot"></span>';
+    }
+    heading.append(group.name + ' ');
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = group.list.length;
+    heading.appendChild(count);
     section.appendChild(heading);
 
     const ul = document.createElement('ul');
@@ -1561,9 +1940,17 @@ function renderTasks() {
   }
 }
 
+document.querySelectorAll('#task-group-switch button').forEach((button) => {
+  button.addEventListener('click', () => {
+    try { localStorage.setItem('taskGroup', button.dataset.group); } catch (err) { /* not remembered */ }
+    renderTasks();
+  });
+});
+
 function taskRow(item) {
   const li = document.createElement('li');
-  li.className = 'task-row' + (item.done ? ' done' : '');
+  const catClass = categoryClass(item.category);
+  li.className = 'task-row' + (item.done ? ' done' : '') + (catClass ? ' cat ' + catClass : '');
 
   const box = document.createElement('input');
   box.type = 'checkbox';
@@ -1582,9 +1969,21 @@ function taskRow(item) {
   const title = document.createElement('span');
   title.className = 'task-title';
   title.textContent = item.title;
+  title.tabIndex = 0;
+  title.setAttribute('role', 'button');
+  title.title = 'Edit';
+  title.addEventListener('click', () => openPopover(item, title));
+  title.addEventListener('keydown', (e) => { if (e.key === 'Enter') openPopover(item, title); });
 
   const meta = document.createElement('span');
   meta.className = 'task-meta';
+  if (item.category) {
+    const label = document.createElement('span');
+    label.className = 'cat-label ' + catClass;
+    label.innerHTML = '<span class="cat-dot"></span>';
+    label.append(item.category);
+    meta.appendChild(label);
+  }
   if (item.repeat) {
     const repeats = document.createElement('span');
     repeats.className = 'repeat-text';
@@ -1617,6 +2016,8 @@ function openAddDialog(date = '', time = '') {
   addForm.reset();
   addForm.date.value = date;
   addForm.time.value = time;
+  fillCategorySelect(addForm.category, '');
+  addForm.more.checked = localStorage.getItem('createMore') === '1';
   dialog.showModal();
   addForm.text.focus();
 }
@@ -1625,6 +2026,103 @@ document.querySelectorAll('[data-add]').forEach((btn) => {
   btn.addEventListener('click', () => openAddDialog(isoDate(new Date())));
 });
 document.getElementById('add-cancel').addEventListener('click', () => dialog.close());
+addForm.more.addEventListener('change', () => {
+  try { localStorage.setItem('createMore', addForm.more.checked ? '1' : '0'); } catch (err) { /* not remembered */ }
+});
+
+// ---------- Edit popover (calendar and Tasks view) ----------
+
+const popover = document.getElementById('item-popover');
+const popForm = document.getElementById('popover-form');
+let popItem = null;
+
+const REPEAT_RULES = [['', 'Does not repeat'], ['every day', 'Every day'], ['every weekday', 'Every weekday'],
+  ['every week', 'Every week'], ['every month', 'Every month'], ['every year', 'Every year']];
+
+function repeatFull(item) {
+  return item.repeat ? item.repeat.text + (item.repeat.until ? ' until ' + item.repeat.until : '') : '';
+}
+
+function openPopover(item, anchor) {
+  popItem = item;
+  popover.dataset.type = item.type;
+  popForm.title.value = item.title;
+  popForm.date.value = item.date || '';
+  popForm.time.value = item.time ? item.time.padStart(5, '0') : '';
+  fillCategorySelect(popForm.category, item.category || '');
+  popForm.done.checked = item.done;
+
+  popForm.repeat.innerHTML = '';
+  const current = repeatFull(item);
+  for (const [value, label] of REPEAT_RULES) popForm.repeat.add(new Option(label, value));
+  if (current && !REPEAT_RULES.some((r) => r[0] === current)) popForm.repeat.add(new Option(current, current));
+  popForm.repeat.value = current;
+
+  popover.hidden = false;
+  const rect = anchor.getBoundingClientRect();
+  const width = popover.offsetWidth;
+  const height = popover.offsetHeight;
+  const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - 12) top = Math.max(12, rect.top - height - 6);
+  popover.style.left = left + 'px';
+  popover.style.top = top + 'px';
+  popForm.title.focus();
+}
+
+function closePopover() {
+  popover.hidden = true;
+  popItem = null;
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (!popover.hidden && !popover.contains(e.target)) closePopover();
+});
+
+popForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const item = popItem;
+  if (!item) return;
+  if (popForm.repeat.value && !popForm.date.value) {
+    toast('Pick a date for a repeating item', true);
+    popForm.date.focus();
+    return;
+  }
+  const changes = {
+    edit: {
+      title: popForm.title.value,
+      category: popForm.category.value,
+      date: popForm.date.value,
+      time: popForm.time.value,
+      repeat: popForm.repeat.value,
+    },
+  };
+  if (item.type === 'task' && popForm.done.checked !== item.done) changes.done = popForm.done.checked;
+  if (await updateItem(item, changes)) {
+    closePopover();
+    toast('Saved');
+    await refreshItems();
+  }
+});
+
+document.getElementById('popover-open').addEventListener('click', () => {
+  const path = popItem.path;
+  closePopover();
+  openNote(path);
+});
+
+document.getElementById('popover-delete').addEventListener('click', async () => {
+  const item = popItem;
+  if (!confirm('Delete this ' + item.type + '?\n\n' + item.title)) return;
+  try {
+    await api('/api/items', { method: 'DELETE', body: { path: item.path, line: item.line, raw: item.raw } });
+    closePopover();
+    toast('Deleted');
+    await refreshItems();
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
 
 addForm.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1642,12 +2140,20 @@ addForm.addEventListener('submit', async (e) => {
         date: addForm.date.value,
         time: addForm.time.value,
         repeat: addForm.repeat.value,
+        category: addForm.category.value,
       },
     });
-    dialog.close();
-    toast('Added to Inbox');
-    await loadNotes();
-    await refreshItems();
+    toast('Added "' + addForm.text.value.trim() + '" to Inbox');
+    if (addForm.more.checked) {
+      // Stay open for the next one: only the text is cleared
+      addForm.text.value = '';
+      addForm.text.focus();
+      loadNotes().then(refreshItems);        // in the background
+    } else {
+      dialog.close();
+      await loadNotes();
+      await refreshItems();
+    }
   } catch (err) {
     toast(err.message, true);
   }
@@ -1659,6 +2165,7 @@ async function showView(name) {
   if (name === currentView && name !== 'notes') return;
   const leavingNotes = currentView === 'notes' && name !== 'notes';
   currentView = name;
+  closePopover();
 
   document.querySelectorAll('[data-view]').forEach((b) => {
     b.classList.toggle('active', b.dataset.view === name);
@@ -1712,17 +2219,18 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'PageDown' || e.key === 'PageUp') {
     e.preventDefault();
     const step = e.key === 'PageDown' ? 1 : -1;
-    const index = tabs.findIndex((t) => t.path === currentPath);
+    const index = tabs.findIndex((t) => t.path === activePath());
     const next = tabs[(index + step + tabs.length) % tabs.length];
-    if (next && next.path !== currentPath) openNote(next.path);
-  } else if (e.code === 'KeyW' && currentPath) {
+    if (next && next.path !== activePath()) openTab(next);
+  } else if (e.code === 'KeyW' && activePath()) {
     e.preventDefault();
-    closeTab(currentPath);
+    closeTab(activePath());
   }
 });
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (!popover.hidden) { closePopover(); return; }
   document.body.classList.remove('menu-open');
   if (selected.size && !document.querySelector('dialog[open]')) clearSelection();
 });
@@ -1747,25 +2255,107 @@ document.addEventListener('keydown', (e) => {
 
 const settingsDialog = document.getElementById('settings-dialog');
 const settingsForm = document.getElementById('settings-form');
+const TAG_NAME = /^\p{L}[\p{L}\p{N}_-]*$/u;
 
 document.getElementById('open-settings').addEventListener('click', () => {
   settingsForm.showInbox.checked = settings.showInbox;
+  settingsForm.livePreview.checked = settings.livePreview;
+  settingsForm.maxFileMB.value = settings.maxFileMB;
   document.getElementById('inbox-hint').textContent = 'Quick add still writes to ' + settings.inbox
     + '. When it is hidden here, you can still find it with search.';
+  renderCategoryRows();
   settingsDialog.showModal();
   document.body.classList.remove('menu-open');
 });
 
-// Saved as soon as the box is clicked
-settingsForm.showInbox.addEventListener('change', async () => {
-  const wanted = settingsForm.showInbox.checked;
+// Sends changed settings to the server and redraws what depends on them
+async function saveSettings(changes) {
   try {
-    settings = await api('/api/settings', { method: 'PUT', body: { showInbox: wanted } });
-    renderNoteList(visibleEntries());
+    settings = await api('/api/settings', { method: 'PUT', body: changes });
   } catch (err) {
-    settingsForm.showInbox.checked = settings.showInbox;
     toast(err.message, true);
+    settings = await api('/api/settings').catch(() => settings);   // back to what the server has
   }
+  renderNoteList(visibleEntries());
+  renderCategoryFilter();
+  updateLivePreview();
+  renderCategoryRows();
+  if (currentView === 'tasks') renderTasks();
+  if (currentView === 'calendar' && calendar) calendar.refetchEvents();
+}
+
+settingsForm.showInbox.addEventListener('change', () => saveSettings({ showInbox: settingsForm.showInbox.checked }));
+settingsForm.livePreview.addEventListener('change', () => saveSettings({ livePreview: settingsForm.livePreview.checked }));
+settingsForm.maxFileMB.addEventListener('change', () => saveSettings({ maxFileMB: parseInt(settingsForm.maxFileMB.value, 10) }));
+
+// One row per category: name, colour, up, down, remove. Every change is saved at once.
+function renderCategoryRows() {
+  const list = document.getElementById('category-list');
+  list.innerHTML = '';
+  const categories = settings.categories;
+
+  categories.forEach((category, i) => {
+    const row = document.createElement('div');
+    row.className = 'cat-row';
+
+    const name = document.createElement('input');
+    name.value = category.name;
+    name.maxLength = 30;
+    name.setAttribute('aria-label', 'Category name');
+    name.addEventListener('change', () => {
+      const value = name.value.trim().replace(/^#/, '');
+      const taken = categories.some((c, k) => k !== i && c.name.toLowerCase() === value.toLowerCase());
+      if (!TAG_NAME.test(value) || taken) {
+        toast(taken ? 'That category already exists' : 'Start with a letter; then letters, numbers, - and _', true);
+        name.value = category.name;
+        return;
+      }
+      saveSettings({ categories: categories.map((c, k) => (k === i ? { name: value, color: c.color } : c)) });
+    });
+
+    const swatches = document.createElement('div');
+    swatches.className = 'swatches';
+    for (const color of settings.palette) {
+      const swatch = document.createElement('button');
+      swatch.type = 'button';
+      swatch.className = 'swatch cat-' + color + (color === category.color ? ' on' : '');
+      swatch.title = color;
+      swatch.setAttribute('aria-label', 'Colour ' + color);
+      swatch.addEventListener('click', () => saveSettings({ categories: categories.map((c, k) => (k === i ? { name: c.name, color: color } : c)) }));
+      swatches.appendChild(swatch);
+    }
+
+    const mini = (text, label, disabled, action) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'mini';
+      b.textContent = text;
+      b.title = label;
+      b.setAttribute('aria-label', label + ' ' + category.name);
+      b.disabled = disabled;
+      b.addEventListener('click', action);
+      return b;
+    };
+    const swap = (k) => { const copy = categories.slice(); [copy[i], copy[k]] = [copy[k], copy[i]]; saveSettings({ categories: copy }); };
+    row.append(
+      name, swatches,
+      mini('\u2191', 'Move up', i === 0, () => swap(i - 1)),
+      mini('\u2193', 'Move down', i === categories.length - 1, () => swap(i + 1)),
+      mini('\u00d7', 'Remove', false, () => saveSettings({ categories: categories.filter((c, k) => k !== i) })));
+    list.appendChild(row);
+  });
+}
+
+// A new category gets a free name and the next colour
+document.getElementById('category-add').addEventListener('click', async () => {
+  const categories = settings.categories;
+  let n = 1;
+  while (categories.some((c) => c.name.toLowerCase() === 'category' + n)) n++;
+  const color = settings.palette.find((p) => !categories.some((c) => c.color === p)) || settings.palette[0];
+  await saveSettings({ categories: categories.concat([{ name: 'category' + n, color: color }]) });
+  const inputs = document.querySelectorAll('#category-list .cat-row input');
+  const last = inputs[inputs.length - 1];
+  if (last) { last.focus(); last.select(); }
 });
 
 // ================= Start =================
@@ -1773,6 +2363,7 @@ settingsForm.showInbox.addEventListener('change', async () => {
 async function start() {
   document.body.dataset.view = 'notes';
   settings = await api('/api/settings').catch(() => settings);
+  renderCategoryFilter();
   loadItems().catch(() => {}); // only for the overdue badge
   await loadNotes();
 
@@ -1781,9 +2372,10 @@ async function start() {
   try { saved = JSON.parse(localStorage.getItem('tabs') || '[]'); } catch (err) { /* ignore */ }
   const last = localStorage.getItem('lastNote');
   if (!Array.isArray(saved) || saved.length === 0) saved = last ? [last] : [];
-  tabs = saved.filter((p) => typeof p === 'string' && notes.some((n) => n.path === p)).map((p) => ({ path: p }));
+  tabs = saved.filter((p) => typeof p === 'string' && entries.some((n) => n.path === p))
+    .map((p) => (p.endsWith('.md') ? { path: p } : { path: p, file: true }));
 
-  const first = tabs.find((t) => t.path === last) || tabs[0] || (notes[0] ? { path: notes[0].path } : null);
+  const first = tabs.find((t) => t.path === last) || tabs.find((t) => !t.file) || (notes[0] ? { path: notes[0].path } : null);
   if (first) {
     await openNote(first.path, true);
   } else {

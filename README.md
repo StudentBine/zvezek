@@ -25,6 +25,16 @@ In the editor and the preview, a due date is drawn as a quiet chip such as `Thu 
 - **Notes:** autosave, folders (name a note `School/RIRS` to put it in a folder), search, `[[wiki links]]`.
 - Quick add puts new items into `Inbox.md`.
 
+## Categories
+
+A category is a `#tag` on a task or event line: `- [ ] RIRS kolokvij #kolokvij due:2026-11-13` (the first tag counts, and a tag must start with a letter, so `#123` is not one). The tag is hidden in calendar and Tasks titles.
+
+- **Settings:** add categories, pick one of 8 colours, reorder with the arrows. They are saved in `.zvezek/settings.json`. Renaming a category does not rewrite your notes: it only changes which tag the colour belongs to.
+- **Calendar:** tasks get a coloured checkbox, events a light tint. The toggles above the calendar show or hide categories (remembered in the browser).
+- **Tasks:** *By date* or *By category* (remembered).
+- **Edit from the calendar or Tasks view:** click an item (the round checkbox still ticks it) for a small popover with title, date, time, category, repeat and done, plus *Open note* and *Delete*. Saving rewrites only that line, and is refused with a message if the note changed in the meantime.
+- **Add dialog:** has a Category field and a *Create more* box (remembered). When it is on, the dialog stays open after adding and only the text is cleared.
+
 ## Repeating tasks and events
 
 ```markdown
@@ -79,6 +89,14 @@ nesting by 4 spaces); the preview shows them as `1.` / `1.1.` / `1.1.1.`.
 - **Shift+Tab** outdents and continues the parent level's numbering.
 - Numbers on both levels are fixed after each of these. Tab and Shift+Tab on bullets and `- [ ]` lines work as before.
 - Numbered tasks work too: `1. [ ] Hand in report due:2026-11-20` shows in the calendar and Tasks view.
+
+## Viewing other files
+
+Clicking a file in the sidebar opens it in a tab: images (click to zoom to 100%), PDFs (the browser's own viewer), text, code, JSON and logs (read-only) and CSV (as a table). Anything else, or a file bigger than the limit in Settings (25 MB by default), shows a card with its name, size and a Download button. `/files` still sends the sandbox header for SVG, HTML and XML; PDFs do not get it, because that would stop the PDF viewer.
+
+## Live preview
+
+In the editor, the marks of bold, italic, `~~strikethrough~~`, `code`, headings and quotes are hidden on every line except the one with the cursor. Turn it off in Settings. It only updates the lines that changed or that the cursor entered or left.
 
 ## Sidebar
 

@@ -1569,3 +1569,150 @@ dialog .actions {
     #tabbar button.active { color: var(--moss); }
   }
 }
+
+/* ================= Categories ================= */
+
+/* Eight colours that sit next to the pine green. No yellow: marigold only means today / due. */
+.cat-pine { --cat: #2F6B57; }
+.cat-moss { --cat: #6B8F4E; }
+.cat-lake { --cat: #3E7CA6; }
+.cat-indigo { --cat: #5B6FB5; }
+.cat-plum { --cat: #8A5A9E; }
+.cat-berry { --cat: #B04A6B; }
+.cat-rust { --cat: #B5603A; }
+.cat-slate { --cat: #6F7A74; }
+
+@media (prefers-color-scheme: dark) {
+  .cat-pine { --cat: #5FA68B; }
+  .cat-moss { --cat: #9DBF7F; }
+  .cat-lake { --cat: #7FB2D6; }
+  .cat-indigo { --cat: #98A8E0; }
+  .cat-plum { --cat: #BE94D2; }
+  .cat-berry { --cat: #DB8FA8; }
+  .cat-rust { --cat: #E39A76; }
+  .cat-slate { --cat: #A5B0AA; }
+}
+
+/* Calendar: tasks get a coloured checkbox, events a light tint of the colour */
+.ev.cat .box { border-color: var(--cat); }
+.fc-event.task.done .ev.cat .box { background: var(--cat); border-color: var(--cat); }
+.fc-event.task.overdue .ev.cat .box { border-color: var(--marigold); }
+.fc-event.event .ev.cat { background: color-mix(in srgb, var(--cat) 16%, transparent); }
+
+@media (prefers-color-scheme: dark) {
+  .fc-event.event .ev.cat { background: color-mix(in srgb, var(--cat) 24%, transparent); }
+}
+
+.cat-dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--cat, var(--stone)); }
+
+/* Tasks view */
+.task-row.cat input[type="checkbox"] { accent-color: var(--cat); }
+.cat-label { display: inline-flex; align-items: center; font-size: 12px; color: var(--stone); white-space: nowrap; }
+.task-title { cursor: pointer; }
+.task-group h2 .cat-dot { width: 9px; height: 9px; margin-right: 8px; }
+
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--radius-small); background: var(--snow); border: 1px solid var(--mist); }
+.seg button { padding: 5px 12px; border: 0; border-radius: 4px; background: transparent; font-size: 13px; font-weight: 600; color: var(--stone); }
+.seg button.active { background: var(--paper); color: var(--granite); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+
+/* Calendar filter: one small toggle per category */
+#cat-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: -6px; }
+#cat-filter[hidden] { display: none; }
+#cat-filter button { display: inline-flex; align-items: center; padding: 4px 11px; border: 1px solid var(--mist); border-radius: 999px; background: var(--paper); font-size: 13px; color: var(--granite); }
+#cat-filter button.off { color: var(--stone); background: transparent; text-decoration: line-through; }
+#cat-filter button.off .cat-dot { opacity: 0.35; }
+
+/* ================= Edit popover ================= */
+
+.popover {
+  position: fixed;
+  z-index: 30;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  padding: 16px;
+  border: 1px solid var(--mist);
+  border-radius: var(--radius-big);
+  background: var(--paper);
+  color: var(--granite);
+  box-shadow: 0 12px 34px rgba(20, 40, 32, 0.22);
+}
+
+.popover[hidden] { display: none; }
+.popover form { display: flex; flex-direction: column; gap: 12px; }
+.popover .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.popover .actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 2px; }
+.popover .actions .danger { margin-right: auto; }
+.popover[data-type="event"] #popover-done { display: none; }
+
+/* Fields look the same here as in dialogs */
+.popover label, dialog .number-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--stone);
+}
+
+.popover label.check { flex-direction: row; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; color: var(--granite); }
+.popover input[type="text"], .popover input:not([type]), .popover input[type="date"], .popover input[type="time"], .popover select,
+dialog .number-row input {
+  padding: 8px 10px;
+  border: 1px solid var(--mist);
+  border-radius: var(--radius-small);
+  background: var(--snow);
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--granite);
+}
+
+.popover input:focus, .popover select:focus, dialog .number-row input:focus { border-color: var(--focus); outline: none; }
+.popover input[type="date"], .popover input[type="time"] { position: relative; }
+.popover input[type="date"]::-webkit-calendar-picker-indicator,
+.popover input[type="time"]::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: auto; height: auto; opacity: 0; cursor: pointer; }
+
+button.danger:hover { color: #8E3324; border-color: #8E3324; }
+
+/* ================= Add dialog and settings ================= */
+
+dialog .actions label.check.more { margin: 0 auto 0 0; font-size: 13px; font-weight: 500; }
+dialog .number-row { margin: 10px 0 4px 0; }
+dialog .number-row input { width: 100px; }
+dialog h3 { margin: 18px 0 4px; font-size: 15px; }
+dialog .hint.flush { margin-left: 0; }
+
+#category-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.cat-row { display: flex; align-items: center; gap: 8px; }
+.cat-row input { flex: 1; min-width: 0; padding: 6px 9px; border: 1px solid var(--mist); border-radius: var(--radius-small); background: var(--snow); color: var(--granite); font-size: 14px; }
+.cat-row .swatches { display: flex; gap: 3px; }
+.cat-row .swatch { width: 18px; height: 18px; padding: 0; border: 2px solid transparent; border-radius: 50%; background: var(--cat); }
+.cat-row .swatch.on { border-color: var(--granite); }
+.cat-row .mini { width: 26px; height: 26px; padding: 0; border: 1px solid var(--mist); border-radius: var(--radius-small); background: transparent; color: var(--stone); }
+.cat-row .mini:hover { color: var(--granite); border-color: var(--stone); }
+.cat-row .mini:disabled { opacity: 0.3; }
+
+/* ================= File viewer ================= */
+
+#file-viewer { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+#file-viewer[hidden] { display: none; }
+#file-viewer header { display: flex; align-items: baseline; gap: 12px; }
+#file-name { font-size: 20px; letter-spacing: -0.015em; overflow-wrap: anywhere; }
+#file-info { flex: 1; font-size: 13px; color: var(--stone); }
+.quiet-link { font-size: 14px; font-weight: 600; color: var(--pine); cursor: pointer; }
+@media (prefers-color-scheme: dark) { .quiet-link { color: var(--moss); } }
+
+#file-body { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--mist); border-radius: var(--radius-big); background: var(--paper); box-shadow: var(--shadow); }
+#file-body iframe { display: block; width: 100%; height: 100%; border: 0; }
+#file-body .image-box { display: flex; min-height: 100%; padding: 16px; }
+#file-body img { margin: auto; max-width: 100%; max-height: calc(100vh - 230px); object-fit: contain; cursor: zoom-in; }
+#file-body img.zoomed { max-width: none; max-height: none; cursor: zoom-out; }
+#file-body pre { margin: 0; padding: 18px 22px; font: 13.5px/1.6 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+#file-body .table-wrap { padding: 4px; }
+#file-body table { border-collapse: collapse; font-size: 14px; }
+#file-body td, #file-body th { padding: 6px 12px; border: 1px solid var(--mist); text-align: left; white-space: nowrap; }
+#file-body tr:first-child td { font-weight: 600; background: var(--snow); }
+.file-card { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 12% auto 0; text-align: center; }
+.file-card h2 { margin: 0; overflow-wrap: anywhere; }
+.file-card p { margin: 0; color: var(--stone); }
+.file-card a.primary { margin-top: 12px; padding: 9px 18px; border-radius: var(--radius-small); background: var(--pine); color: #fff; font-weight: 600; text-decoration: none; }
+.file-note { padding: 10px 22px; font-size: 13px; color: var(--stone); border-top: 1px solid var(--mist); }

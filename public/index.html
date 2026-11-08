@@ -87,6 +87,15 @@
       <div class="editor-wrap">
         <textarea id="editor"></textarea>
       </div>
+      <!-- Other files (images, pdf, text ...) open here, in a tab -->
+      <div id="file-viewer" hidden>
+        <header>
+          <strong id="file-name"></strong>
+          <span id="file-info"></span>
+          <a id="file-download" class="quiet-link" download>Download</a>
+        </header>
+        <div id="file-body"></div>
+      </div>
       <div id="empty-notes" class="empty" hidden>
         <svg viewBox="0 0 64 40" aria-hidden="true"><path d="M2 38 20 10l10 15 8-10 24 23Z"/><circle cx="50" cy="8" r="4"/></svg>
         <h2>Nothing open</h2>
@@ -101,6 +110,7 @@
         <h1>Calendar</h1>
         <button class="primary" data-add>Add to Inbox</button>
       </header>
+      <div id="cat-filter" aria-label="Show categories" hidden></div>
       <div id="calendar"></div>
     </section>
 
@@ -108,6 +118,10 @@
     <section id="view-tasks" class="view">
       <header class="view-head">
         <h1>Tasks</h1>
+        <div class="seg" id="task-group-switch" role="group" aria-label="Group tasks">
+          <button data-group="date">By date</button>
+          <button data-group="category">By category</button>
+        </div>
         <button class="primary" data-add>Add to Inbox</button>
       </header>
       <div id="task-groups"></div>
@@ -164,7 +178,11 @@
           <option value="yearly">Every year</option>
         </select>
       </label>
+      <label class="repeat-field">Category
+        <select name="category"></select>
+      </label>
       <div class="actions">
+        <label class="check more"><input type="checkbox" name="more"><span>Create more</span></label>
         <button type="button" class="quiet" id="add-cancel">Cancel</button>
         <button type="submit" class="primary">Add</button>
       </div>
@@ -180,11 +198,44 @@
         <span>Show Inbox in sidebar</span>
       </label>
       <p class="hint" id="inbox-hint"></p>
+      <label class="check">
+        <input type="checkbox" name="livePreview">
+        <span>Live preview (hide **, #, &gt; ... away from the cursor)</span>
+      </label>
+      <label class="number-row">
+        <span>Biggest file shown in a tab (MB)</span>
+        <input type="number" name="maxFileMB" min="1" max="1000" step="1">
+      </label>
+      <h3>Categories</h3>
+      <p class="hint flush">Write <code>#name</code> on a task or event line. Pick a colour for each name.</p>
+      <div id="category-list"></div>
+      <button type="button" class="quiet" id="category-add">Add category</button>
       <div class="actions">
         <button type="submit" class="primary">Done</button>
       </div>
     </form>
   </dialog>
+
+  <!-- Edit one task or event from the calendar or the Tasks view -->
+  <div id="item-popover" class="popover" role="dialog" aria-label="Edit" hidden>
+    <form id="popover-form" autocomplete="off">
+      <label>Title <input name="title" required></label>
+      <div class="row">
+        <label>Date <input type="date" name="date"></label>
+        <label>Time <input type="time" name="time"></label>
+      </div>
+      <div class="row">
+        <label>Category <select name="category"></select></label>
+        <label>Repeat <select name="repeat"></select></label>
+      </div>
+      <label class="check" id="popover-done"><input type="checkbox" name="done"><span>Done</span></label>
+      <div class="actions">
+        <button type="button" class="quiet danger" id="popover-delete">Delete</button>
+        <button type="button" class="quiet" id="popover-open">Open note</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </div>
 
   <div id="toast" role="status"></div>
 

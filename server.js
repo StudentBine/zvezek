@@ -2,7 +2,7 @@ const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
 const { constants: fsConstants } = require('fs');
-const { parseFile, setDate, completeTask, reopenTask, repeatOf, occurrences, isRealDate, addDays } = require('./parser');
+const { parseFile, setDate, editLine, completeTask, reopenTask, repeatOf, occurrences, isRealDate, addDays } = require('./parser');
 const { rewriteImageLinks } = require('./links');
 
 const PORT = process.env.PORT || 3000;
@@ -354,24 +354,37 @@ app.get('/api/search', handle(async (req, res) => {
 // which means they are the same on every device that opens this notes folder.
 
 const SETTINGS_FILE = path.join(DATA_DIR, '.zvezek', 'settings.json');
-const DEFAULT_SETTINGS = { showInbox: true };
+const PALETTE = ['pine', 'moss', 'lake', 'indigo', 'plum', 'berry', 'rust', 'slate'];   // colours of categories (see style.css)
+const TAG_NAME = /^\p{L}[\p{L}\p{N}_-]*$/u;
+
+// What each setting must look like. Anything else in the file is ignored.
+const SETTING_CHECKS = {
+  showInbox: (v) => typeof v === 'boolean',
+  livePreview: (v) => typeof v === 'boolean',
+  maxFileMB: (v) => Number.isInteger(v) && v >= 1 && v <= 1000,
+  categories: (v) => Array.isArray(v) && v.length <= 30
+    && v.every((c) => c && typeof c.name === 'string' && c.name.length <= 30 && TAG_NAME.test(c.name) && PALETTE.includes(c.color))
+    && new Set(v.map((c) => c.name.toLowerCase())).size === v.length,
+};
+const DEFAULT_SETTINGS = { showInbox: true, livePreview: true, maxFileMB: 25, categories: [] };
+
+function cleanSetting(key, value) {
+  return key === 'categories' ? value.map((c) => ({ name: c.name, color: c.color })) : value;
+}
 
 async function readSettings() {
-  try {
-    const saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
-    const settings = { ...DEFAULT_SETTINGS };
-    for (const key of Object.keys(DEFAULT_SETTINGS)) {
-      if (typeof saved[key] === typeof DEFAULT_SETTINGS[key]) settings[key] = saved[key];
-    }
-    return settings;
-  } catch (err) {
-    return { ...DEFAULT_SETTINGS };      // no file yet, or it is not valid JSON
+  let saved = {};
+  try { saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')); } catch (err) { /* no file yet, or not valid JSON */ }
+  const settings = {};
+  for (const key of Object.keys(DEFAULT_SETTINGS)) {
+    settings[key] = SETTING_CHECKS[key](saved[key]) ? cleanSetting(key, saved[key]) : DEFAULT_SETTINGS[key];
   }
+  return settings;
 }
 
 // "inbox" is the name of the inbox note, so the page knows which note to hide
 app.get('/api/settings', handle(async (req, res) => {
-  res.json({ ...(await readSettings()), inbox: INBOX_FILE });
+  res.json({ ...(await readSettings()), inbox: INBOX_FILE, palette: PALETTE });
 }));
 
 app.put('/api/settings', handle(async (req, res) => {
@@ -379,12 +392,12 @@ app.put('/api/settings', handle(async (req, res) => {
   const body = req.body || {};
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     if (body[key] === undefined) continue;
-    if (typeof body[key] !== typeof DEFAULT_SETTINGS[key]) throw new Error('Setting "' + key + '" has the wrong type');
-    settings[key] = body[key];
+    if (!SETTING_CHECKS[key](body[key])) throw new Error('Setting "' + key + '" is not valid');
+    settings[key] = cleanSetting(key, body[key]);
   }
   await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
   await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n');
-  res.json({ ...settings, inbox: INBOX_FILE });
+  res.json({ ...settings, inbox: INBOX_FILE, palette: PALETTE });
 }));
 
 // ---------- Tasks & events API ----------
@@ -434,6 +447,12 @@ app.post('/api/items', handle(async (req, res) => {
 
   let line = req.body.type === 'event' ? '- ' + text : '- [ ] ' + text;
 
+  const category = req.body.category || '';
+  if (category) {
+    if (!TAG_NAME.test(category)) throw new Error('Category can only have letters, numbers, - and _');
+    line += ' #' + category;
+  }
+
   // Repeat: the rule goes before the date ("... repeat: every week due:2026-11-09")
   const repeat = req.body.repeat || 'none';
   if (repeat !== 'none') {
@@ -463,6 +482,13 @@ app.patch('/api/items', handle(async (req, res) => {
     return res.status(409).json({ error: 'This note changed in the meantime. Reload and try again.' });
   }
 
+  // Edited fields from the popover (title, category, repeat, date, time)
+  if (req.body.edit) {
+    const isEvent = !/^\s*(?:[-*]|\d+[.)]) \[[ xX]\] /.test(line);
+    if (isEvent && req.body.edit.date === '') throw new Error('An event needs a date');
+    line = editLine(line, req.body.edit);
+  }
+
   // The ticked line, and for a repeating task also a new open line above it (see parser.js)
   let newLines = [line];
   if (typeof req.body.done === 'boolean') {
@@ -482,6 +508,18 @@ app.patch('/api/items', handle(async (req, res) => {
   lines.splice(req.body.line, 1, ...newLines);
   await writeNote(full, lines.join('\n'));
   res.json({ ok: true, raw: newLines[newLines.length - 1], inserted: newLines.length - 1 });
+}));
+
+// Delete one task/event line (same "has the note changed?" check as PATCH)
+app.delete('/api/items', handle(async (req, res) => {
+  const full = safePath(req.body.path);
+  const lines = (await fs.readFile(full, 'utf8')).split('\n');
+  if (lines[req.body.line] !== req.body.raw) {
+    return res.status(409).json({ error: 'This note changed in the meantime. Reload and try again.' });
+  }
+  lines.splice(req.body.line, 1);
+  await writeNote(full, lines.join('\n'));
+  res.json({ ok: true });
 }));
 
 // ---------- Start ----------

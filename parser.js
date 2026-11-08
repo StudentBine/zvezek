@@ -14,6 +14,10 @@
 //
 // A ticked task gets "done:2026-11-08".
 //
+// A category is a #tag on the line (the first one counts):
+//
+//   - [ ] RIRS kolokvij #kolokvij due:2026-11-13
+//
 // Older notes use emoji instead (the Obsidian Tasks way): 📅 2026-11-09, 🔁 every week, ✅ 2026-11-08.
 // Both spellings are read. Everything Zvezek writes uses the text spelling, and when it changes
 // a line that has emoji (ticking, dragging) the whole line is converted (see modernize below).
@@ -23,6 +27,7 @@ const LIST_REGEX = /^(\s*)[-*] (.*)$/;
 const DATE_REGEX = /(?:📅|due:)\s*(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/;
 // "repeat: every week" (or "🔁 every week") up to the next marker (due:, done: ...) or the end of the line
 const REPEAT_REGEX = /(?:🔁|\brepeat:)\s*((?:(?!📅|due:|✅|done:|⏳|🛫|➕|❌).)*)/su;
+const TAG_REGEX = /(?:^|\s)#(\p{L}[\p{L}\p{N}_-]*)/u;     // "#kolokvij" (must start with a letter, so "#123" is not a tag)
 const DONE_DATE_REGEX = /\s*(?:✅|\bdone:)\s*\d{4}-\d{2}-\d{2}/;
 
 // ================= Dates (plain "YYYY-MM-DD" strings, no time zones) =================
@@ -171,12 +176,14 @@ function findDate(text) {
   const dateMatch = text.match(DATE_REGEX);
   const repeatMatch = text.match(REPEAT_REGEX);
   const rule = repeatMatch ? parseRepeat(repeatMatch[1]) : null;
+  const tagMatch = text.match(TAG_REGEX);
 
   // Remove the markers from the title so it looks clean in the calendar.
   // A repeat text we do not understand stays in the title, so it is not silently lost.
   let title = text;
   if (dateMatch) title = title.replace(dateMatch[0], '');
   if (rule) title = title.replace(repeatMatch[0], '');
+  if (tagMatch) title = title.replace(tagMatch[0], ' ');
   title = title.replace(DONE_DATE_REGEX, '').replace(/\s+/g, ' ').trim();
 
   let repeat = null;
@@ -189,6 +196,7 @@ function findDate(text) {
     time: dateMatch ? dateMatch[2] || null : null,
     title: title,
     repeat: repeat,
+    category: tagMatch ? tagMatch[1] : null,
   };
 }
 
@@ -219,6 +227,7 @@ function parseFile(filePath, content) {
         date: info.date,
         time: info.time,
         repeat: info.repeat,
+        category: info.category,
         path: filePath,
         line: i,
         raw: line,
@@ -238,6 +247,7 @@ function parseFile(filePath, content) {
           date: info.date,
           time: info.time,
           repeat: info.repeat,
+          category: info.category,
           path: filePath,
           line: i,
           raw: line,
@@ -278,6 +288,38 @@ function setDate(line, date, time) {
   return line.trimEnd() + ' ' + newDate;
 }
 
+// Rewrites one line from edited fields (the calendar popover). Every field is optional:
+// title, category ('' = none), repeat (full rule text like "every week until 2026-12-20", '' = none),
+// date ('' = none) and time. The checkbox and a done: date stay as they are.
+function editLine(line, fields) {
+  const m = line.match(/^(\s*(?:[-*]|\d+[.)]) (?:\[[ xX]\] )?)(.*)$/);
+  if (!m) throw new Error('This line is not a task or event any more');
+  const info = findDate(m[2]);
+  const done = m[2].match(DONE_DATE_REGEX);
+  const pick = (name, old) => (fields[name] === undefined ? old : fields[name]);
+
+  const title = String(pick('title', info.title)).replace(/\s+/g, ' ').trim();
+  const category = pick('category', info.category || '');
+  const oldRepeat = info.repeat ? info.repeat.text + (info.repeat.until ? ' until ' + info.repeat.until : '') : '';
+  const repeat = String(pick('repeat', oldRepeat)).trim();
+  const date = pick('date', info.date || '');
+  const time = fields.date === undefined && fields.time === undefined ? info.time : fields.time || null;
+
+  if (!title) throw new Error('Write a title first');
+  if (category && !/^\p{L}[\p{L}\p{N}_-]*$/u.test(category)) throw new Error('Category can only have letters, numbers, - and _');
+  if (date && !isRealDate(date)) throw new Error('That date does not exist');
+  if (time && !/^\d{1,2}:\d{2}$/.test(time)) throw new Error('Time must look like 14:30');
+  if (repeat && !parseRepeat(repeat)) throw new Error('Repeat rule not understood');
+  if (repeat && !date) throw new Error('Pick a date for a repeating item');
+
+  let out = m[1] + title;
+  if (category) out += ' #' + category;
+  if (repeat) out += ' repeat: ' + repeat;
+  if (date) out += ' due:' + date + (time ? ' ' + time : '');
+  if (done) out += ' done:' + done[0].match(/\d{4}-\d{2}-\d{2}/)[0];
+  return out;
+}
+
 // Ticking a task gives back the line(s) that replace it.
 // A normal task: the same line, ticked.
 // A repeating task (this is how Obsidian Tasks does it): a new open line with the next date,
@@ -299,5 +341,5 @@ function reopenTask(line) {
 
 module.exports = {
   parseFile, setDone, setDate, completeTask, reopenTask,
-  parseRepeat, occurrences, nextDate, repeatOf, addDays, isRealDate, modernize,
+  parseRepeat, occurrences, nextDate, repeatOf, addDays, isRealDate, modernize, editLine,
 };
