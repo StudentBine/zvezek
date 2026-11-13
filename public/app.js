@@ -8,7 +8,10 @@ async function api(url, options = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || 'Request failed (' + res.status + ')');
+    const err = new Error(data.error || 'Request failed (' + res.status + ')');
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
@@ -69,7 +72,7 @@ let calendar = null;
 let currentView = 'notes';
 let selected = new Set();   // notes ticked in the sidebar (Ctrl/Shift+click)
 let anchorPath = null;      // where a Shift+click range starts
-let settings = { showInbox: true, inbox: 'Inbox.md', livePreview: true, maxFileMB: 25, categories: [], palette: [] };   // saved on the server (see "Settings" below)
+let settings = { showInbox: true, inbox: 'Inbox.md', livePreview: true, wideEditor: false, showHidden: false, maxFileMB: 25, categories: [], hidden: [], folderColors: {}, palette: [] };   // saved on the server (see "Settings" below)
 
 // ================= Notes list =================
 
@@ -85,7 +88,19 @@ async function loadNotes() {
 
 // The sidebar list without the Inbox when "Show Inbox in sidebar" is off (search still finds it)
 function visibleEntries() {
-  return settings.showInbox ? entries : entries.filter((e) => e.path !== settings.inbox);
+  let list = settings.showInbox ? entries : entries.filter((e) => e.path !== settings.inbox);
+  if (!settings.showHidden) list = list.filter((e) => !hiddenBy(e.path));
+  return list;
+}
+
+// A hidden note, file or folder is gone from the sidebar (search and the calendar still see it).
+// A hidden folder hides everything inside. Returns the entry of the hidden list that hides this path.
+function hiddenBy(path) {
+  return settings.hidden.find((h) => path === h || path.startsWith(h + '/')) || null;
+}
+
+async function reloadSettings() {
+  settings = await api('/api/settings').catch(() => settings);   // the server may have moved hidden items and colours
 }
 
 // Small icons for files that are not notes
@@ -104,6 +119,7 @@ function fileLink(file) {
   link.dataset.kind = file.kind;
   link.href = '/files/' + file.path.split('/').map(encodeURIComponent).join('/');
   link.target = '_blank';
+  link.draggable = false;          // the row (li) is what gets dragged
   link.rel = 'noopener';
   const name = file.path.split('/').pop();
   link.title = name + (typeof file.size === 'number' ? ' (' + prettySize(file.size) + ')' : '');
@@ -133,12 +149,13 @@ function renderNoteList(list, snippets = {}) {
   const container = document.getElementById('note-list');
   container.innerHTML = '';
 
+  // Folders are made from the paths of the files in them. Empty folders come as { kind: 'folder' }.
   const folders = {};
   for (const note of list) {
     const parts = note.path.split('/');
-    const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '';
+    const folder = note.kind === 'folder' ? note.path : parts.slice(0, -1).join('/');
     if (!folders[folder]) folders[folder] = [];
-    folders[folder].push(note);
+    if (note.kind !== 'folder') folders[folder].push(note);
   }
 
   const folderNames = Object.keys(folders).sort((a, b) => {
@@ -154,13 +171,20 @@ function renderNoteList(list, snippets = {}) {
 
     for (const note of ordered) {
       const li = document.createElement('li');
+      li.dataset.path = note.path;
+      li.draggable = true;                       // drag onto a folder to move it
+      if (hiddenBy(note.path)) li.classList.add('is-hidden');
 
       if (note.kind === 'note') {
-        const btn = document.createElement('button');
+        // A div that acts as a button: Firefox cannot start a drag from a real <button>
+        const btn = document.createElement('div');
+        btn.setAttribute('role', 'button');
+        btn.tabIndex = 0;
         btn.textContent = noteName(note.path);
         btn.dataset.path = note.path;
         btn.className = 'note-link' + (note.path === currentPath ? ' current' : '') + (selected.has(note.path) ? ' selected' : '');
         btn.addEventListener('click', (e) => onNoteClick(e, note.path));
+        btn.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); btn.click(); } });
         li.appendChild(btn);
       } else {
         li.appendChild(fileLink(note));
@@ -179,9 +203,36 @@ function renderNoteList(list, snippets = {}) {
     } else {
       const details = document.createElement('details');
       details.open = true;
+      details.dataset.folder = folder;
+      if (hiddenBy(folder)) details.classList.add('is-hidden');
+
       const summary = document.createElement('summary');
-      summary.textContent = folder;
+      summary.dataset.folder = folder;
+      summary.draggable = true;
+      const colour = settings.folderColors[folder];
+      if (colour) {
+        summary.classList.add('cat-' + colour);
+        summary.innerHTML = '<svg class="folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5H19a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/></svg>';
+      }
+      const name = document.createElement('span');
+      name.className = 'folder-name';
+      name.textContent = folder;
+      summary.appendChild(name);
+      if (hiddenBy(folder)) {
+        const mark = document.createElement('span');
+        mark.className = 'hidden-mark';
+        mark.textContent = 'hidden';
+        summary.appendChild(mark);
+      }
       details.appendChild(summary);
+
+      // "Empty" only for a folder with nothing at all (a folder with subfolders is not empty)
+      if (ordered.length === 0 && !folderNames.some((n) => n.startsWith(folder + '/'))) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-folder';
+        empty.textContent = 'Empty';
+        details.appendChild(empty);
+      }
       details.appendChild(ul);
       container.appendChild(details);
     }
@@ -194,6 +245,268 @@ function renderNoteList(list, snippets = {}) {
   }
 }
 
+// ---------- Folders: create, rename, delete, colour ----------
+
+async function createFolder(path) {
+  try {
+    await api('/api/folders', { method: 'POST', body: { path: path } });
+    await loadNotes();
+    toast('Folder created');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+// parent = the folder to create it in ('' = top level)
+function askNewFolder(parent = '') {
+  const name = prompt(parent ? 'New folder inside "' + parent + '":' : 'New folder name (use / for a subfolder):');
+  if (name && name.trim()) createFolder(parent ? parent + '/' + name.trim() : name.trim());
+}
+
+document.getElementById('new-folder').addEventListener('click', () => askNewFolder(''));
+
+// Paths of the open tabs below a folder, as { old: new } for renameTabs()
+function tabChangesForFolder(from, to) {
+  const changes = {};
+  for (const tab of tabs) {
+    if (tab.path.startsWith(from + '/')) changes[tab.path] = to + tab.path.slice(from.length);
+  }
+  return changes;
+}
+
+// Rename a folder, or move it (to = its new full path). Notes inside keep their tabs.
+async function renameFolder(from, to) {
+  to = to.trim().replace(/^\/+|\/+$/g, '');
+  if (!to || to === from) return;
+  try {
+    await saveNote();
+    await api('/api/folders/rename', { method: 'POST', body: { from: from, to: to } });
+    renameTabs(tabChangesForFolder(from, to));
+    await reloadSettings();
+    await loadNotes();
+    loadItems().catch(() => {});
+    await reloadOpenNote();
+    toast('Moved "' + from + '" to "' + to + '"');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function deleteFolder(path) {
+  try {
+    try {
+      await api('/api/folders', { method: 'DELETE', body: { path: path } });
+    } catch (err) {
+      // A folder with files in it is only deleted after the answer "yes", which says how many files
+      if (err.status !== 409 || !err.data || !err.data.count) throw err;
+      if (!confirm(err.message + '. Delete the folder "' + path + '" and everything in it? This cannot be undone.')) return;
+      await saveNote();
+      await api('/api/folders', { method: 'DELETE', body: { path: path, force: true } });
+    }
+    await forgetNotes(tabs.map((t) => t.path).filter((p) => p.startsWith(path + '/')));
+    await reloadSettings();
+    await loadNotes();
+    loadItems().catch(() => {});
+    toast('Folder deleted');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function setFolderColour(path, colour) {
+  const colours = { ...settings.folderColors };
+  if (colour) colours[path] = colour; else delete colours[path];
+  saveSettings({ folderColors: colours });
+}
+
+// ---------- Hide notes, files and folders ----------
+
+function hideItems(paths) {
+  saveSettings({ hidden: Array.from(new Set(settings.hidden.concat(paths))) });
+}
+
+function unhideItems(paths) {
+  saveSettings({ hidden: settings.hidden.filter((h) => !paths.includes(h)) });
+}
+
+document.getElementById('select-hide').addEventListener('click', () => {
+  const paths = Array.from(selected);
+  clearSelection();
+  hideItems(paths);
+  toast('Hidden ' + paths.length + ' items. Settings has the list to unhide them.');
+});
+
+// ---------- Right-click menu ----------
+
+const menu = document.getElementById('context-menu');
+
+function closeMenu() {
+  menu.hidden = true;
+}
+
+function menuItem(label, action, className = '') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = className;
+  button.textContent = label;
+  button.addEventListener('click', () => { closeMenu(); action(); });
+  menu.appendChild(button);
+}
+
+function menuRule() {
+  menu.appendChild(document.createElement('hr'));
+}
+
+function openMenu(e) {
+  menu.hidden = false;
+  const left = Math.max(8, Math.min(e.clientX, window.innerWidth - menu.offsetWidth - 8));
+  const top = Math.max(8, Math.min(e.clientY, window.innerHeight - menu.offsetHeight - 8));
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+  const first = menu.querySelector('button');
+  if (first) first.focus();
+}
+
+// Hide / Unhide for one path (or for the whole selection when the path is part of it)
+function menuHideItem(paths) {
+  const direct = paths.filter((p) => settings.hidden.includes(p));
+  if (direct.length === paths.length) menuItem('Unhide', () => unhideItems(paths));
+  else if (paths.every((p) => hiddenBy(p))) menu.appendChild(Object.assign(document.createElement('p'), { className: 'menu-note', textContent: 'Hidden with its folder' }));
+  else menuItem('Hide', () => hideItems(paths.filter((p) => !hiddenBy(p))));
+}
+
+document.getElementById('note-list').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  menu.innerHTML = '';
+  const summary = e.target.closest('summary[data-folder]');
+  const row = e.target.closest('li[data-path]');
+
+  if (summary) {
+    const folder = summary.dataset.folder;
+    menuItem('New subfolder…', () => askNewFolder(folder));
+    menuItem('Rename or move…', () => {
+      const to = prompt('New name or place for "' + folder + '":', folder);
+      if (to) renameFolder(folder, to);
+    });
+    menuRule();
+    const swatches = document.createElement('div');
+    swatches.className = 'swatches';
+    const none = document.createElement('button');
+    none.type = 'button';
+    none.className = 'swatch none' + (settings.folderColors[folder] ? '' : ' on');
+    none.title = 'No colour';
+    none.addEventListener('click', () => { closeMenu(); setFolderColour(folder, null); });
+    swatches.appendChild(none);
+    for (const colour of settings.palette) {
+      const dot = document.createElement('button');
+      dot.type = 'button';
+      dot.className = 'swatch cat-' + colour + (settings.folderColors[folder] === colour ? ' on' : '');
+      dot.title = colour;
+      dot.addEventListener('click', () => { closeMenu(); setFolderColour(folder, colour); });
+      swatches.appendChild(dot);
+    }
+    menu.appendChild(swatches);
+    menuRule();
+    menuHideItem([folder]);
+    menuItem('Delete folder…', () => deleteFolder(folder), 'danger');
+  } else if (row) {
+    const path = row.dataset.path;
+    const paths = selected.has(path) && selected.size > 1 ? Array.from(selected) : [path];
+    menuHideItem(paths);
+  } else {
+    menuItem('New folder…', () => askNewFolder(''));
+  }
+  openMenu(e);
+});
+
+document.addEventListener('mousedown', (e) => { if (!menu.hidden && !menu.contains(e.target)) closeMenu(); });
+window.addEventListener('blur', closeMenu);
+window.addEventListener('resize', closeMenu);
+document.getElementById('note-list').addEventListener('scroll', closeMenu);
+
+// ---------- Drag and drop in the sidebar ----------
+// Notes and files go onto a folder (or onto the empty part of the list = top level).
+// A folder goes onto another folder. A dragged note that is part of a selection takes the whole selection.
+
+let dragging = null;     // { paths: [...], folder: 'A/B' or null } while something is being dragged
+const DRAG_TYPE = 'application/x-zvezek-items';
+const noteListEl = document.getElementById('note-list');
+
+noteListEl.addEventListener('dragstart', (e) => {
+  const summary = e.target.closest && e.target.closest('summary[data-folder]');
+  const row = e.target.closest && e.target.closest('li[data-path]');
+  if (summary) {
+    dragging = { paths: [], folder: summary.dataset.folder };
+  } else if (row) {
+    const path = row.dataset.path;
+    dragging = { paths: selected.has(path) && selected.size > 1 ? Array.from(selected) : [path], folder: null };
+  } else {
+    return;
+  }
+  e.dataTransfer.setData(DRAG_TYPE, '1');
+  e.dataTransfer.effectAllowed = 'move';
+});
+
+function clearDropTargets() {
+  noteListEl.classList.remove('drop-root');
+  noteListEl.querySelectorAll('.drop-target').forEach((el) => el.classList.remove('drop-target'));
+}
+
+// Which folder is under the mouse? '' = the top level
+function folderUnder(e) {
+  const details = e.target.closest && e.target.closest('details[data-folder]');
+  return details ? details.dataset.folder : '';
+}
+
+// A folder cannot go into itself or into its own subfolders, and moving it where it already is does nothing
+function canDropOn(folder) {
+  if (!dragging) return false;
+  if (dragging.folder === null) return true;
+  const parent = dragging.folder.split('/').slice(0, -1).join('/');
+  return folder !== dragging.folder && !(folder + '/').startsWith(dragging.folder + '/') && folder !== parent;
+}
+
+noteListEl.addEventListener('dragover', (e) => {
+  if (!dragging) return;
+  const folder = folderUnder(e);
+  clearDropTargets();
+  if (!canDropOn(folder)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  if (folder) noteListEl.querySelector('details[data-folder="' + CSS.escape(folder) + '"]').classList.add('drop-target');
+  else noteListEl.classList.add('drop-root');
+});
+
+noteListEl.addEventListener('dragleave', (e) => {
+  if (!noteListEl.contains(e.relatedTarget)) clearDropTargets();
+});
+
+noteListEl.addEventListener('dragend', () => {
+  dragging = null;
+  clearDropTargets();
+});
+
+noteListEl.addEventListener('drop', async (e) => {
+  const drag = dragging;
+  const folder = folderUnder(e);
+  const allowed = canDropOn(folder);
+  dragging = null;
+  clearDropTargets();
+  if (!drag || !allowed) return;
+  e.preventDefault();
+
+  if (drag.folder !== null) {
+    const name = drag.folder.split('/').pop();
+    await renameFolder(drag.folder, folder ? folder + '/' + name : name);
+  } else {
+    // notes already in that folder are left out
+    const paths = drag.paths.filter((p) => p.split('/').slice(0, -1).join('/') !== folder);
+    if (paths.length) {
+      try { await moveItems(paths, folder); } catch (err) { toast(err.message, true); }
+    }
+  }
+});
+
 // ================= Editor =================
 
 const editor = new EasyMDE({
@@ -203,7 +516,10 @@ const editor = new EasyMDE({
   tabSize: 4,              // nested lists are indented with 4 spaces
   indentWithTabs: false,
   autoDownloadFontAwesome: false, // icons are served locally from /vendor/font-awesome
+  unorderedListStyle: '-',       // the Bullet list button writes "- ", like the rest of the notes
   sideBySideFullscreen: false,   // side by side stays inside the page; it never takes over the screen
+  // Ctrl+L belongs to the sidebar now. F11 would put the editor in fullscreen, which we do not want.
+  shortcuts: { toggleUnorderedList: 'Shift-Cmd-8', toggleOrderedList: 'Shift-Cmd-7', toggleFullScreen: null },
   placeholder: 'Start writing. Add a task with  - [ ] something due:2026-11-20',
   // Grouped: text style | lists and tasks | insert | view
   toolbar: [
@@ -485,6 +801,13 @@ function onTab(cm, direction) {
   cm.setSelections(sels.map((s) => ({ anchor: moved(s.anchor), head: moved(s.head) })));
 }
 
+// Is this line inside a ``` block? (counts the fences above it)
+function inCodeFence(cm, lineNo) {
+  let fences = 0;
+  cm.eachLine(0, lineNo, (handle) => { if (/^\s*(```|~~~)/.test(handle.text)) fences++; });
+  return fences % 2 === 1;
+}
+
 function onEnter(cm) {
   if (!cm.somethingSelected()) {
     const cursor = cm.getCursor();
@@ -492,6 +815,24 @@ function onEnter(cm) {
     if (result) {
       applyListResult(cm, result);
       cm.setCursor(result.cursor);
+      return;
+    }
+
+    const line = cm.getLine(cursor.line);
+
+    // An empty bullet or task item: out one level, or at the top level the marker goes
+    // and an empty line is left.
+    if (/^\s*[-*+] (\[[ xX]\] )?\s*$/.test(line) && cursor.ch >= line.length - 1) {
+      const outdented = /^\s/.test(line) ? line.replace(/^( {1,4}|\t)/, '') : '';
+      cm.replaceRange(outdented, { line: cursor.line, ch: 0 }, { line: cursor.line, ch: line.length });
+      cm.setCursor({ line: cursor.line, ch: outdented.length });
+      return;
+    }
+
+    // An indented line that is not a list item: the new line starts at the left edge
+    // (inside a code block the indent is kept, because code needs it)
+    if (/^\s+\S/.test(line) && !/^\s*([-*+]|\d+[.)]) /.test(line) && !inCodeFence(cm, cursor.line)) {
+      cm.replaceSelection('\n', 'end');
       return;
     }
   }
@@ -506,10 +847,11 @@ editor.codemirror.setOption('extraKeys', Object.assign({}, editor.codemirror.get
 
 editor.codemirror.on('change', (cm, change) => {
   if (change.origin === 'setValue') return; // loading a note is not an edit
+  if (!currentPath) return;
   dirty = true;
-  setSaveState('Unsaved');
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveNote, 800);
+  updateTabDots();
+  writeDraft(currentPath, editor.value());   // every change is kept locally right away
+  scheduleSave();
 });
 
 // ---------- Dates in the editor ----------
@@ -759,31 +1101,159 @@ document.querySelector('.editor-wrap').addEventListener('click', async (e) => {
   }
 });
 
-let saveStateText = '';
+// ================= Saving =================
+// 1. Every change is written to a draft in localStorage at once.
+// 2. The server gets the note 2.5 s after typing stops, and at least every 15 s while typing goes on.
+// 3. It is also saved on switching tab or view, on leaving the window, and when the page closes.
+// 4. If the server cannot be reached, the draft stays and saving is tried again (waiting longer each time).
+//    A saved note clears its draft. A draft that is newer than the saved note is offered on opening it.
 
+const SAVE_QUIET_MS = 2500;
+const SAVE_MAX_MS = 15000;
+let maxTimer = null;
+const retries = {};      // path -> { timer, delay }
+
+function draftKey(path) { return 'draft:' + path; }
+
+function writeDraft(path, content) {
+  try { localStorage.setItem(draftKey(path), JSON.stringify({ content: content, time: Date.now() })); } catch (err) { /* full or private mode */ }
+}
+
+function readDraft(path) {
+  try { return JSON.parse(localStorage.getItem(draftKey(path))); } catch (err) { return null; }
+}
+
+function clearDraft(path) {
+  try { localStorage.removeItem(draftKey(path)); } catch (err) { /* ignore */ }
+}
+
+// Only a problem is shown: "Offline, saved locally". Everything else is quiet.
 function setSaveState(text) {
   const el = document.getElementById('save-state');
   el.textContent = text;
-  el.dataset.state = text.toLowerCase().replace(' ', '-');
-  saveStateText = text;
+  el.dataset.state = text ? 'offline' : '';
   updateTabDots();
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveNote, SAVE_QUIET_MS);
+  if (!maxTimer) maxTimer = setTimeout(saveNote, SAVE_MAX_MS);
+}
+
+function stopSaveTimers() {
+  clearTimeout(saveTimer);
+  clearTimeout(maxTimer);
+  maxTimer = null;
+}
+
+// Sends one note to the server. Returns true when it is saved there.
+async function sendNote(path, content) {
+  try {
+    await api('/api/note?path=' + encodeURIComponent(path), { method: 'PUT', body: { content: content } });
+    const draft = readDraft(path);
+    if (draft && draft.content === content) clearDraft(path);
+    if (retries[path]) { clearTimeout(retries[path].timer); delete retries[path]; }
+    return true;
+  } catch (err) {
+    retrySoon(path);
+    return false;
+  }
+}
+
+// Try again later (2 s, 4 s, 8 s ... at most a minute), with the newest draft
+function retrySoon(path) {
+  const retry = retries[path] || (retries[path] = { delay: 2000, timer: null });
+  clearTimeout(retry.timer);
+  retry.timer = setTimeout(async () => {
+    const draft = readDraft(path);
+    if (!draft) { delete retries[path]; return; }
+    retry.delay = Math.min(retry.delay * 2, 60000);
+    if (await sendNote(path, draft.content) && path === currentPath && editor.value() === draft.content) {
+      dirty = false;
+      setSaveState('');
+    }
+  }, retry.delay);
+  if (path === currentPath) setSaveState('Offline, saved locally');
 }
 
 async function saveNote() {
   if (!currentPath || !dirty) return;
-  clearTimeout(saveTimer);
-  try {
-    await api('/api/note?path=' + encodeURIComponent(currentPath), {
-      method: 'PUT',
-      body: { content: editor.value() },
-    });
+  stopSaveTimers();
+  const path = currentPath;
+  const content = editor.value();
+  writeDraft(path, content);
+  if (!(await sendNote(path, content))) return;
+  if (path !== currentPath) return;
+  if (editor.value() === content) {
     dirty = false;
-    setSaveState('Saved');
-  } catch (err) {
-    setSaveState('Not saved');
-    toast(err.message, true);
+    setSaveState('');
+  } else {
+    scheduleSave();       // typing went on while saving
   }
 }
+
+// For the moment the page is hidden or closed: a normal request may be cut off, "keepalive" is not.
+// (It cannot be longer than 64 KB; a bigger note stays in the local draft and is offered next time.)
+function saveBeforeLeaving() {
+  if (!currentPath || !dirty) return;
+  const content = editor.value();
+  writeDraft(currentPath, content);
+  fetch('/api/note?path=' + encodeURIComponent(currentPath), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: content }),
+    keepalive: true,
+  }).catch(() => { /* the draft is still there */ });
+}
+
+window.addEventListener('blur', () => saveNote());
+window.addEventListener('online', () => Object.keys(retries).forEach(retrySoon));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveBeforeLeaving(); });
+window.addEventListener('beforeunload', saveBeforeLeaving);
+
+// A draft newer than the note on the server: ask what to do
+const draftBar = document.getElementById('draft-bar');
+let draftPath = null;
+
+function hideDraftBar() {
+  draftBar.hidden = true;
+  draftPath = null;
+}
+
+// Called after a note is loaded. server = { content, modified }
+function checkDraft(path, server) {
+  hideDraftBar();
+  const draft = readDraft(path);
+  if (!draft) return;
+  if (draft.content === server.content || draft.time <= server.modified) {
+    clearDraft(path);                 // nothing to restore: the server has the same or a newer text
+    return;
+  }
+  const when = new Date(draft.time);
+  const today = new Date().toDateString() === when.toDateString();
+  document.getElementById('draft-text').textContent = 'Unsaved changes from '
+    + (today ? '' : when.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) + ', ')
+    + when.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + ' were found.';
+  draftPath = path;
+  draftBar.hidden = false;
+}
+
+document.getElementById('draft-restore').addEventListener('click', () => {
+  const draft = draftPath && readDraft(draftPath);
+  if (draft && draftPath === currentPath) {
+    editor.value(draft.content);
+    dirty = true;
+    updateTabDots();
+    scheduleSave();
+  }
+  hideDraftBar();
+});
+
+document.getElementById('draft-discard').addEventListener('click', () => {
+  if (draftPath) clearDraft(draftPath);
+  hideDraftBar();
+});
 
 // ================= Tabs =================
 // Every open note is a tab. There is still only one editor: switching tabs saves the note,
@@ -799,17 +1269,62 @@ function tabFor(path) {
   return tabs.find((t) => t.path === path);
 }
 
-// Cursor and scroll position of the open note, so they can be restored later
-function rememberTab() {
+// Where I am in each note: cursor and selection, scroll position of the editor and of the preview panes.
+// It is tracked all the time (not only when switching), because an editor that is hidden cannot
+// tell its scroll position. It is saved with the open tabs, so a reload keeps it too.
+let restoring = false;          // true while a tab is being put back, so half-finished positions are not stored
+let tabStateTimer = null;
+
+function trackTab() {
+  if (restoring || !currentPath) return;
   const tab = tabFor(currentPath);
-  if (!tab) return;
-  tab.cursor = editor.codemirror.getCursor();
-  tab.scroll = editor.codemirror.getScrollInfo();
+  const cm = editor.codemirror;
+  if (!tab || cm.getWrapperElement().offsetParent === null) return;    // the editor is not on screen
+  const sel = cm.listSelections()[0];
+  const info = cm.getScrollInfo();
+  tab.sel = { anchor: sel.anchor, head: sel.head };
+  tab.scroll = { left: info.left, top: info.top };
+  tab.preview = editor.isPreviewActive();
+  const full = document.querySelector('.editor-preview');
+  const side = document.querySelector('.editor-preview-side');
+  if (full && full.offsetParent !== null) tab.previewTop = full.scrollTop;
+  if (side && side.offsetParent !== null) tab.sideTop = side.scrollTop;
+  clearTimeout(tabStateTimer);
+  tabStateTimer = setTimeout(saveTabs, 400);
+}
+
+const rememberTab = trackTab;
+editor.codemirror.on('cursorActivity', trackTab);
+document.querySelector('.editor-wrap').addEventListener('scroll', trackTab, true);       // editor and both previews
+document.querySelector('.editor-wrap').addEventListener('click', () => setTimeout(trackTab, 0), true);   // preview buttons
+
+// Puts the position of a tab back. Done after the note is in the editor, the editor is on screen and
+// CodeMirror has measured it, and once more a moment later (fonts, images and diagrams change heights).
+function restoreTab(tab) {
+  const cm = editor.codemirror;
+  restoring = true;
+  const apply = () => {
+    cm.refresh();
+    if (tab.sel) cm.setSelection(tab.sel.anchor, tab.sel.head, { scroll: false });
+    if (tab.scroll) cm.scrollTo(tab.scroll.left, tab.scroll.top);
+    const full = document.querySelector('.editor-preview');
+    const side = document.querySelector('.editor-preview-side');
+    if (full && tab.previewTop) full.scrollTop = tab.previewTop;
+    if (side && tab.sideTop) side.scrollTop = tab.sideTop;
+  };
+  apply();
+  requestAnimationFrame(apply);
+  setTimeout(() => { apply(); restoring = false; }, 120);
 }
 
 function saveTabs() {
   try {
     localStorage.setItem('tabs', JSON.stringify(tabs.map((t) => t.path)));
+    const state = {};
+    for (const t of tabs) {
+      if (t.sel || t.scroll) state[t.path] = { sel: t.sel, scroll: t.scroll, preview: t.preview, previewTop: t.previewTop, sideTop: t.sideTop };
+    }
+    localStorage.setItem('tabState', JSON.stringify(state));
     if (currentPath) localStorage.setItem('lastNote', currentPath);
     else localStorage.removeItem('lastNote');
   } catch (err) { /* private mode: tabs just are not remembered */ }
@@ -824,7 +1339,7 @@ function tabLabel(path) {
 
 // The dot on the tab of the note with unsaved changes
 function updateTabDots() {
-  const unsaved = saveStateText === 'Unsaved' || saveStateText === 'Not saved';
+  const unsaved = dirty;
   document.querySelectorAll('#tabs .tab').forEach((el) => {
     el.classList.toggle('unsaved', unsaved && el.dataset.path === currentPath);
   });
@@ -1039,6 +1554,7 @@ async function openNote(path, quiet = false) {
     if (!tabFor(path)) tabs.push({ path: path });
     const tab = tabFor(path);
 
+    restoring = true;              // while the note is swapped, positions are not stored
     if (editor.isPreviewActive()) editor.togglePreview(); // the preview would still show the old note
     editor.value(data.content);
     dirty = false;
@@ -1047,10 +1563,11 @@ async function openNote(path, quiet = false) {
     showView('notes');
     showNoteEditor(true);
 
-    // back where I was in this note
+    // back where I was in this note (the editor is on screen now, so it can measure itself)
     const cm = editor.codemirror;
-    if (tab.cursor) cm.setCursor(tab.cursor);
-    if (tab.scroll) cm.scrollTo(tab.scroll.left, tab.scroll.top);
+    if (tab.preview && !editor.isPreviewActive()) editor.togglePreview();
+    restoreTab(tab);
+    checkDraft(path, data);
     if (!quiet && desktop.matches) cm.focus();
 
     renderTabs();
@@ -1058,6 +1575,7 @@ async function openNote(path, quiet = false) {
     renderNoteList(visibleEntries());
     document.body.classList.remove('menu-open');
   } catch (err) {
+    restoring = false;
     toast(err.message, true);
     // a note that is gone should not stay as a tab
     if (/not found/i.test(err.message) && tabFor(path) && path !== currentPath) {
@@ -1364,6 +1882,7 @@ function updateSelectBar() {
 // After a move or delete: reload the list and forget the selection
 async function afterBulkChange() {
   clearSelection();
+  await reloadSettings();     // hidden items and folder colours move along with their notes
   await loadNotes();
   loadItems().catch(() => {});   // task paths changed too
 }
@@ -1406,7 +1925,7 @@ const moveNew = document.getElementById('move-new');
 function allFolders() {
   const folders = new Set();
   for (const note of entries) {
-    const parts = noteFolder(note.path).split('/').filter(Boolean);
+    const parts = (note.kind === 'folder' ? note.path : noteFolder(note.path)).split('/').filter(Boolean);
     for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join('/'));
   }
   return Array.from(folders).sort((a, b) => a.localeCompare(b));
@@ -1453,30 +1972,34 @@ document.getElementById('move-form').addEventListener('submit', async (e) => {
     }
   }
 
-  const paths = Array.from(selected);
   try {
-    await saveNote();
-    const result = await api('/api/notes/move', { method: 'POST', body: { paths: paths, folder: folder } });
     moveDialog.close();
-
-    // Open notes (and their tabs) stay open, at their new path
-    const changes = {};
-    for (const m of result.moved) changes[m.from] = m.to;
-    renameTabs(changes);
-    await afterBulkChange();
-    await reloadOpenNote();
-
-    const where = folder || 'the top level';
-    if (result.failed.length) {
-      toast('Moved ' + result.moved.length + ' to ' + where + '. Not moved: '
-        + result.failed.map((f) => noteName(f.path) + ' (' + f.error + ')').join(', '), true, 8000);
-    } else {
-      toast('Moved ' + result.moved.length + (result.moved.every((m) => m.to.endsWith('.md')) ? ' notes' : ' items') + ' to ' + where);
-    }
+    await moveItems(Array.from(selected), folder);
   } catch (err) {
     toast(err.message, true);
   }
 });
+
+// Moves notes and files into a folder ('' = top level). Used by the Move dialog and by drag and drop.
+async function moveItems(paths, folder) {
+  await saveNote();
+  const result = await api('/api/notes/move', { method: 'POST', body: { paths: paths, folder: folder } });
+
+  // Open notes (and their tabs) stay open, at their new path
+  const changes = {};
+  for (const m of result.moved) changes[m.from] = m.to;
+  renameTabs(changes);
+  await afterBulkChange();
+  await reloadOpenNote();
+
+  const where = folder || 'the top level';
+  if (result.failed.length) {
+    toast('Moved ' + result.moved.length + ' to ' + where + '. Not moved: '
+      + result.failed.map((f) => noteName(f.path) + ' (' + f.error + ')').join(', '), true, 8000);
+  } else {
+    toast('Moved ' + result.moved.length + (result.moved.every((m) => m.to.endsWith('.md')) ? ' notes' : ' items') + ' to ' + where);
+  }
+}
 
 // ================= Sidebar: hide and resize =================
 
@@ -1536,12 +2059,135 @@ document.getElementById('expand-sidebar').addEventListener('click', () => {
   document.getElementById('collapse-sidebar').focus();
 });
 
-// Ctrl+\ (Cmd+\ on a Mac)
+// ================= Keyboard shortcuts =================
+
+const isMac = /Mac/.test(navigator.platform);
+
+// The list in Settings. "Mod" is Ctrl (Cmd on a Mac).
+const SHORTCUTS = [
+  ['Show or hide the sidebar', 'Mod+L'],
+  ['Go to Notes', 'Alt+Shift+N'],
+  ['Go to Calendar', 'Alt+Shift+C'],
+  ['Go to Tasks', 'Alt+Shift+K'],
+  ['Full view (writing mode)', 'Alt+Shift+F'],
+  ['Save now', 'Mod+S'],
+  ['Previous or next tab', 'Alt+PageUp, Alt+PageDown'],
+  ['Close tab', 'Alt+W'],
+  ['Bold, italic, link', 'Mod+B, Mod+I, Mod+K'],
+  ['Bullet list', 'Mod+Shift+8'],
+  ['Numbered list', 'Mod+Shift+7'],
+  ['Task list', 'Mod+Shift+L'],
+  ['Preview, side by side', 'Mod+P, F9'],
+  ['Indent or outdent a list item', 'Tab, Shift+Tab'],
+  ['Close a menu, leave full view', 'Esc'],
+];
+
+function renderShortcutList() {
+  const list = document.getElementById('shortcut-list');
+  list.innerHTML = '';
+  for (const [what, keys] of SHORTCUTS) {
+    const dt = document.createElement('dt');
+    dt.textContent = what;
+    const dd = document.createElement('dd');
+    keys.split(', ').forEach((combo, i) => {
+      if (i) dd.append(' ');
+      const kbd = document.createElement('kbd');
+      kbd.textContent = combo.replace('Mod', isMac ? 'Cmd' : 'Ctrl').replace('Alt', isMac ? 'Option' : 'Alt');
+      dd.appendChild(kbd);
+    });
+    list.append(dt, dd);
+  }
+}
+
+// Alt+Shift+letter is used for the views. (Alt+Shift+T would clash with "focus the toolbar" in Chrome,
+// so Tasks is K.) Letters are read from the key, with the physical key as a fallback for a Mac.
 document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
+  const mod = e.ctrlKey || e.metaKey;
+  const letter = (e.key || '').length === 1 ? e.key.toLowerCase() : '';
+  const is = (l, code) => letter === l || e.code === code;
+
+  // Ctrl+L: sidebar. preventDefault also stops the browser from jumping to the address bar.
+  if (mod && !e.altKey && !e.shiftKey && is('l', 'KeyL')) {
     e.preventDefault();
     if (desktop.matches) setSidebarCollapsed(!isCollapsed());
+    else document.body.classList.toggle('menu-open');
+    return;
   }
+
+  if (e.altKey && e.shiftKey && !mod && !document.querySelector('dialog[open]')) {
+    const views = [['n', 'KeyN', 'notes'], ['c', 'KeyC', 'calendar'], ['k', 'KeyK', 'tasks']];
+    const hit = views.find(([l, code]) => is(l, code));
+    if (hit) {
+      e.preventDefault();
+      document.querySelector('#sidebar button[data-view="' + hit[2] + '"]').click();
+    } else if (is('f', 'KeyF')) {
+      e.preventDefault();
+      setFullView(!document.body.classList.contains('full-view'));
+    }
+  }
+}, true);
+
+// ================= Full view (writing mode) =================
+// Only the editor is left, in the middle. The toolbar shows when the mouse is at the top or has focus.
+
+function setFullView(on) {
+  if (on && (currentView !== 'notes' || !currentPath)) return;
+  document.body.classList.toggle('full-view', on);
+  editor.codemirror.refresh();
+  if (calendar) calendar.updateSize();
+  if (on) {
+    toast('Full view. Press Esc to leave it.');
+    editor.codemirror.focus();
+  }
+}
+
+document.getElementById('full-view').addEventListener('click', () => setFullView(true));
+
+// ================= Wide editor, and the line between the editor and the preview =================
+
+function applyLookSettings() {
+  document.body.classList.toggle('wide-editor', settings.wideEditor);
+}
+
+// Side by side: drag the line to change the width of the two parts. The place is remembered.
+const editorBox = document.querySelector('.EasyMDEContainer');
+const splitHandle = document.createElement('div');
+splitHandle.id = 'split-handle';
+splitHandle.setAttribute('role', 'separator');
+splitHandle.setAttribute('aria-orientation', 'vertical');
+splitHandle.setAttribute('aria-label', 'Resize the editor and the preview');
+splitHandle.tabIndex = 0;
+editorBox.appendChild(splitHandle);
+
+function setSplit(fraction, save = true) {
+  fraction = Math.max(0.2, Math.min(0.8, fraction));
+  editorBox.style.setProperty('--split', fraction);
+  if (save) remember('splitPosition', fraction);
+  editor.codemirror.refresh();
+}
+
+setSplit(parseFloat(localStorage.getItem('splitPosition')) || 0.5, false);
+
+splitHandle.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  splitHandle.setPointerCapture(e.pointerId);
+  document.body.classList.add('splitting');
+});
+splitHandle.addEventListener('pointermove', (e) => {
+  if (!splitHandle.hasPointerCapture(e.pointerId)) return;
+  const box = editorBox.getBoundingClientRect();
+  setSplit((e.clientX - box.left) / box.width, false);
+});
+splitHandle.addEventListener('pointerup', (e) => {
+  splitHandle.releasePointerCapture(e.pointerId);
+  document.body.classList.remove('splitting');
+  remember('splitPosition', editorBox.style.getPropertyValue('--split'));
+});
+splitHandle.addEventListener('dblclick', () => setSplit(0.5));
+splitHandle.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  setSplit((parseFloat(editorBox.style.getPropertyValue('--split')) || 0.5) + (e.key === 'ArrowRight' ? 0.02 : -0.02));
 });
 
 // Drag the right edge
@@ -1693,7 +2339,8 @@ async function refreshItems() {
 
 // "every week" or "every week until 2026-12-20", for tooltips and the Tasks view
 function repeatText(item) {
-  return item.repeat.text + (item.repeat.until ? ' until ' + prettyDate(item.repeat.until) : '');
+  const r = item.repeat;
+  return r.text + (r.until ? ' until ' + prettyDate(r.until) : '') + (r.count ? ', ' + r.count + (r.count === 1 ? ' time' : ' times') : '');
 }
 
 function eventStart(item, date) {
@@ -2012,11 +2659,22 @@ function taskRow(item) {
 const dialog = document.getElementById('add-dialog');
 const addForm = document.getElementById('add-form');
 
+// "Ends" (Never / On date / After N times) is only there when the item repeats
+function syncEnds(form) {
+  const row = form.querySelector('.ends-row');
+  row.hidden = !form.repeat.value || form.repeat.value === 'none';
+  row.querySelector('.ends-date').hidden = form.ends.value !== 'date';
+  row.querySelector('.ends-count').hidden = form.ends.value !== 'count';
+}
+addForm.repeat.addEventListener('change', () => syncEnds(addForm));
+addForm.ends.addEventListener('change', () => syncEnds(addForm));
+
 function openAddDialog(date = '', time = '') {
   addForm.reset();
   addForm.date.value = date;
   addForm.time.value = time;
   fillCategorySelect(addForm.category, '');
+  syncEnds(addForm);
   addForm.more.checked = localStorage.getItem('createMore') === '1';
   dialog.showModal();
   addForm.text.focus();
@@ -2039,9 +2697,11 @@ let popItem = null;
 const REPEAT_RULES = [['', 'Does not repeat'], ['every day', 'Every day'], ['every weekday', 'Every weekday'],
   ['every week', 'Every week'], ['every month', 'Every month'], ['every year', 'Every year']];
 
-function repeatFull(item) {
-  return item.repeat ? item.repeat.text + (item.repeat.until ? ' until ' + item.repeat.until : '') : '';
+function syncPopoverEnds() {
+  syncEnds(popForm);
 }
+popForm.repeat.addEventListener('change', syncPopoverEnds);
+popForm.ends.addEventListener('change', syncPopoverEnds);
 
 function openPopover(item, anchor) {
   popItem = item;
@@ -2053,10 +2713,15 @@ function openPopover(item, anchor) {
   popForm.done.checked = item.done;
 
   popForm.repeat.innerHTML = '';
-  const current = repeatFull(item);
+  const current = item.repeat ? item.repeat.text : '';
   for (const [value, label] of REPEAT_RULES) popForm.repeat.add(new Option(label, value));
   if (current && !REPEAT_RULES.some((r) => r[0] === current)) popForm.repeat.add(new Option(current, current));
   popForm.repeat.value = current;
+  const repeat = item.repeat || {};
+  popForm.ends.value = repeat.until ? 'date' : repeat.count ? 'count' : 'never';
+  popForm.until.value = repeat.until || '';
+  popForm.count.value = repeat.count || 10;
+  syncPopoverEnds();
 
   popover.hidden = false;
   const rect = anchor.getBoundingClientRect();
@@ -2088,13 +2753,25 @@ popForm.addEventListener('submit', async (e) => {
     popForm.date.focus();
     return;
   }
+  // the rule and how it ends are written together: "every week until 2026-12-20" or "every week count 10"
+  let repeat = popForm.repeat.value;
+  if (repeat && popForm.ends.value === 'date') {
+    if (!popForm.until.value || popForm.until.value < popForm.date.value) {
+      toast('Pick the last date, on or after the first one', true);
+      popForm.until.focus();
+      return;
+    }
+    repeat += ' until ' + popForm.until.value;
+  } else if (repeat && popForm.ends.value === 'count') {
+    repeat += ' count ' + Math.max(1, parseInt(popForm.count.value, 10) || 1);
+  }
   const changes = {
     edit: {
       title: popForm.title.value,
       category: popForm.category.value,
       date: popForm.date.value,
       time: popForm.time.value,
-      repeat: popForm.repeat.value,
+      repeat: repeat,
     },
   };
   if (item.type === 'task' && popForm.done.checked !== item.done) changes.done = popForm.done.checked;
@@ -2131,6 +2808,11 @@ addForm.addEventListener('submit', async (e) => {
     addForm.date.focus();
     return;
   }
+  if (addForm.repeat.value !== 'none' && addForm.ends.value === 'date' && (!addForm.until.value || addForm.until.value < addForm.date.value)) {
+    toast('Pick the last date, on or after the first one', true);
+    addForm.until.focus();
+    return;
+  }
   try {
     await api('/api/items', {
       method: 'POST',
@@ -2141,6 +2823,9 @@ addForm.addEventListener('submit', async (e) => {
         time: addForm.time.value,
         repeat: addForm.repeat.value,
         category: addForm.category.value,
+        ends: addForm.ends.value,
+        until: addForm.until.value,
+        count: addForm.count.value,
       },
     });
     toast('Added "' + addForm.text.value.trim() + '" to Inbox');
@@ -2166,6 +2851,7 @@ async function showView(name) {
   const leavingNotes = currentView === 'notes' && name !== 'notes';
   currentView = name;
   closePopover();
+  if (name !== 'notes') document.body.classList.remove('full-view');
 
   document.querySelectorAll('[data-view]').forEach((b) => {
     b.classList.toggle('active', b.dataset.view === name);
@@ -2231,16 +2917,10 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!popover.hidden) { closePopover(); return; }
+  if (!menu.hidden) { closeMenu(); return; }
+  if (document.body.classList.contains('full-view') && !document.querySelector('dialog[open]')) { setFullView(false); return; }
   document.body.classList.remove('menu-open');
   if (selected.size && !document.querySelector('dialog[open]')) clearSelection();
-});
-
-// Save before closing the tab
-window.addEventListener('beforeunload', (e) => {
-  if (dirty) {
-    saveNote();
-    e.preventDefault();
-  }
 });
 
 // Ctrl+S saves right away
@@ -2261,6 +2941,9 @@ document.getElementById('open-settings').addEventListener('click', () => {
   settingsForm.showInbox.checked = settings.showInbox;
   settingsForm.livePreview.checked = settings.livePreview;
   settingsForm.maxFileMB.value = settings.maxFileMB;
+  settingsForm.wideEditor.checked = settings.wideEditor;
+  settingsForm.showHidden.checked = settings.showHidden;
+  renderHiddenList();
   document.getElementById('inbox-hint').textContent = 'Quick add still writes to ' + settings.inbox
     + '. When it is hidden here, you can still find it with search.';
   renderCategoryRows();
@@ -2279,14 +2962,38 @@ async function saveSettings(changes) {
   renderNoteList(visibleEntries());
   renderCategoryFilter();
   updateLivePreview();
+  applyLookSettings();
   renderCategoryRows();
+  renderHiddenList();
   if (currentView === 'tasks') renderTasks();
   if (currentView === 'calendar' && calendar) calendar.refetchEvents();
 }
 
 settingsForm.showInbox.addEventListener('change', () => saveSettings({ showInbox: settingsForm.showInbox.checked }));
 settingsForm.livePreview.addEventListener('change', () => saveSettings({ livePreview: settingsForm.livePreview.checked }));
+settingsForm.wideEditor.addEventListener('change', () => saveSettings({ wideEditor: settingsForm.wideEditor.checked }));
+settingsForm.showHidden.addEventListener('change', () => saveSettings({ showHidden: settingsForm.showHidden.checked }));
 settingsForm.maxFileMB.addEventListener('change', () => saveSettings({ maxFileMB: parseInt(settingsForm.maxFileMB.value, 10) }));
+
+// The hidden notes, files and folders, each with an Unhide button
+function renderHiddenList() {
+  const list = document.getElementById('hidden-list');
+  list.innerHTML = '';
+  for (const path of settings.hidden) {
+    const row = document.createElement('div');
+    row.className = 'hidden-row';
+    const name = document.createElement('span');
+    name.textContent = path.replace(/\.md$/, '');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'quiet';
+    button.textContent = 'Unhide';
+    button.setAttribute('aria-label', 'Unhide ' + path);
+    button.addEventListener('click', () => unhideItems([path]));
+    row.append(name, button);
+    list.appendChild(row);
+  }
+}
 
 // One row per category: name, colour, up, down, remove. Every change is saved at once.
 function renderCategoryRows() {
@@ -2363,6 +3070,8 @@ document.getElementById('category-add').addEventListener('click', async () => {
 async function start() {
   document.body.dataset.view = 'notes';
   settings = await api('/api/settings').catch(() => settings);
+  applyLookSettings();
+  renderShortcutList();
   renderCategoryFilter();
   loadItems().catch(() => {}); // only for the overdue badge
   await loadNotes();
@@ -2374,6 +3083,10 @@ async function start() {
   if (!Array.isArray(saved) || saved.length === 0) saved = last ? [last] : [];
   tabs = saved.filter((p) => typeof p === 'string' && entries.some((n) => n.path === p))
     .map((p) => (p.endsWith('.md') ? { path: p } : { path: p, file: true }));
+  try {
+    const state = JSON.parse(localStorage.getItem('tabState') || '{}');
+    for (const tab of tabs) Object.assign(tab, state[tab.path] || {});
+  } catch (err) { /* no saved positions */ }
 
   const first = tabs.find((t) => t.path === last) || tabs.find((t) => !t.file) || (notes[0] ? { path: notes[0].path } : null);
   if (first) {

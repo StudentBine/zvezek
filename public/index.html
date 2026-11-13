@@ -28,7 +28,7 @@
     <div class="brand">
       <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 26 L12 11 L17 18 L21 13 L29 26 Z"/><circle cx="24" cy="7" r="3"/></svg>
       <span>Zvezek</span>
-      <button id="collapse-sidebar" title="Hide sidebar (Ctrl+\)" aria-label="Hide sidebar">
+      <button id="collapse-sidebar" title="Hide sidebar (Ctrl+L)" aria-label="Hide sidebar">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15M16 10l-2 2 2 2"/></svg>
       </button>
     </div>
@@ -43,18 +43,22 @@
 
     <div class="sidebar-head">
       <span>Your notes</span>
-      <button id="new-note" title="New note" aria-label="New note">+</button>
+      <span class="head-buttons">
+        <button id="new-folder" title="New folder" aria-label="New folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5H19a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/><path d="M12 11v5M9.5 13.5h5"/></svg></button>
+        <button id="new-note" title="New note" aria-label="New note">+</button>
+      </span>
     </div>
     <div id="note-list"></div>
 
     <div id="select-bar" hidden>
       <span id="select-count"></span>
       <button id="select-move" class="quiet">Move to folder</button>
+      <button id="select-hide" class="quiet">Hide</button>
       <button id="select-delete" class="quiet danger">Delete</button>
       <button id="select-clear" class="quiet">Clear</button>
     </div>
     <button id="open-settings" class="sidebar-link">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
       <span>Settings</span>
     </button>
   </aside>
@@ -65,7 +69,7 @@
 
   <!-- Shown instead of the sidebar when it is hidden -->
   <nav id="mini-nav" aria-label="Views">
-    <button id="expand-sidebar" title="Show sidebar (Ctrl+\)" aria-label="Show sidebar">
+    <button id="expand-sidebar" title="Show sidebar (Ctrl+L)" aria-label="Show sidebar">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15M14 10l2 2-2 2"/></svg>
     </button>
     <button data-view="notes" class="active" title="Notes" aria-label="Notes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/></svg></button>
@@ -82,8 +86,14 @@
       <header class="view-head">
         <input id="note-title" aria-label="Note name" spellcheck="false">
         <span id="save-state"></span>
+        <button id="full-view" class="quiet" title="Full view (Alt+Shift+F)">Full view</button>
         <button id="delete-note" class="quiet">Delete</button>
       </header>
+      <div id="draft-bar" hidden>
+        <span id="draft-text"></span>
+        <button id="draft-restore" class="primary">Restore</button>
+        <button id="draft-discard" class="quiet">Discard</button>
+      </div>
       <div class="editor-wrap">
         <textarea id="editor"></textarea>
       </div>
@@ -178,6 +188,17 @@
           <option value="yearly">Every year</option>
         </select>
       </label>
+      <div class="row ends-row" hidden>
+        <label>Ends
+          <select name="ends">
+            <option value="never">Never</option>
+            <option value="date">On date</option>
+            <option value="count">After N times</option>
+          </select>
+        </label>
+        <label class="ends-date" hidden>Last date <input type="date" name="until"></label>
+        <label class="ends-count" hidden>Times <input type="number" name="count" min="1" max="999" value="10"></label>
+      </div>
       <label class="repeat-field">Category
         <select name="category"></select>
       </label>
@@ -202,10 +223,21 @@
         <input type="checkbox" name="livePreview">
         <span>Live preview (hide **, #, &gt; ... away from the cursor)</span>
       </label>
+      <label class="check">
+        <input type="checkbox" name="wideEditor">
+        <span>Wide editor (use the full width, not a reading column)</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" name="showHidden">
+        <span>Show hidden notes in the sidebar</span>
+      </label>
+      <div id="hidden-list" class="hidden-list"></div>
       <label class="number-row">
         <span>Biggest file shown in a tab (MB)</span>
         <input type="number" name="maxFileMB" min="1" max="1000" step="1">
       </label>
+      <h3>Keyboard shortcuts</h3>
+      <dl class="shortcut-list" id="shortcut-list"></dl>
       <h3>Categories</h3>
       <p class="hint flush">Write <code>#name</code> on a task or event line. Pick a colour for each name.</p>
       <div id="category-list"></div>
@@ -228,6 +260,17 @@
         <label>Category <select name="category"></select></label>
         <label>Repeat <select name="repeat"></select></label>
       </div>
+      <div class="row ends-row" hidden>
+        <label>Ends
+          <select name="ends">
+            <option value="never">Never</option>
+            <option value="date">On date</option>
+            <option value="count">After N times</option>
+          </select>
+        </label>
+        <label class="ends-date" hidden>Last date <input type="date" name="until"></label>
+        <label class="ends-count" hidden>Times <input type="number" name="count" min="1" max="999" value="10"></label>
+      </div>
       <label class="check" id="popover-done"><input type="checkbox" name="done"><span>Done</span></label>
       <div class="actions">
         <button type="button" class="quiet danger" id="popover-delete">Delete</button>
@@ -236,6 +279,9 @@
       </div>
     </form>
   </div>
+
+  <!-- Right-click menu of the sidebar (notes, files and folders) -->
+  <div id="context-menu" role="menu" hidden></div>
 
   <div id="toast" role="status"></div>
 

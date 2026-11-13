@@ -196,16 +196,6 @@ async function moveNote(fromRel, toRel) {
     throw err;
   });
   await fs.unlink(from);
-  await removeEmptyFolders(path.dirname(from));
-}
-
-// Removes a folder (and its parents) if they are empty, but never DATA_DIR itself
-async function removeEmptyFolders(dir) {
-  while (dir !== DATA_DIR && dir.startsWith(DATA_DIR + path.sep)) {
-    const removed = await fs.rmdir(dir).then(() => true).catch(() => false);
-    if (!removed) break;
-    dir = path.dirname(dir);
-  }
 }
 
 // Moves any other file (pdf, image, zip ...). Never overwrites. Nothing inside is changed.
@@ -221,7 +211,6 @@ async function moveFile(fromRel, toRel) {
     throw err;
   });
   await fs.unlink(from);
-  await removeEmptyFolders(path.dirname(from));
 }
 
 // Wraps a route so errors become a JSON response instead of crashing
@@ -238,15 +227,29 @@ function handle(fn) {
 
 // ---------- Notes API ----------
 
+// Folders with no files directly in them (empty ones, or only holding other folders), so they show in
+// the sidebar too. Folders that have files show up through those files.
+async function listEmptyFolders(dir = DATA_DIR) {
+  let result = [];
+  const names = (await fs.readdir(dir, { withFileTypes: true })).filter((e) => !e.name.startsWith('.'));
+  if (dir !== DATA_DIR && !names.some((e) => !e.isDirectory())) result.push({ path: relPath(dir), kind: 'folder' });
+  for (const entry of names) {
+    if (entry.isDirectory()) result = result.concat(await listEmptyFolders(path.join(dir, entry.name)));
+  }
+  return result;
+}
+
 app.get('/api/notes', handle(async (req, res) => {
-  const notes = await listAllFiles();
+  const notes = (await listAllFiles()).concat(await listEmptyFolders());
   notes.sort((a, b) => a.path.localeCompare(b.path));
   res.json(notes);
 }));
 
+// "modified" lets the page tell whether a local draft is newer than the saved note
 app.get('/api/note', handle(async (req, res) => {
-  const content = await fs.readFile(safePath(req.query.path), 'utf8');
-  res.json({ path: req.query.path, content: content });
+  const full = safePath(req.query.path);
+  const content = await fs.readFile(full, 'utf8');
+  res.json({ path: req.query.path, content: content, modified: (await fs.stat(full)).mtimeMs });
 }));
 
 // Create a new note (fails if it already exists)
@@ -267,12 +270,15 @@ app.put('/api/note', handle(async (req, res) => {
 }));
 
 app.delete('/api/note', handle(async (req, res) => {
-  await fs.unlink(safePath(req.query.path));
+  const full = safePath(req.query.path);
+  await fs.unlink(full);
+  await remapSettingsPaths(relPath(full), null);
   res.json({ ok: true });
 }));
 
 app.post('/api/rename', handle(async (req, res) => {
   await moveNote(req.body.from, req.body.to);
+  await remapSettingsPaths(relPath(safePath(req.body.from)), relPath(safePath(req.body.to)));
   res.json({ ok: true });
 }));
 
@@ -294,6 +300,7 @@ app.post('/api/notes/move', handle(async (req, res) => {
       if (from === to) throw new Error('already in that folder');
       if (from.endsWith('.md')) await moveNote(relPath(from), relPath(to));
       else await moveFile(relPath(from), relPath(to));
+      await remapSettingsPaths(relPath(from), relPath(to));
       moved.push({ from: relPath(from), to: relPath(to) });
     } catch (err) {
       failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
@@ -313,13 +320,96 @@ app.post('/api/notes/delete', handle(async (req, res) => {
     try {
       const full = entryPath(rel);
       await fs.unlink(full);
-      await removeEmptyFolders(path.dirname(full));
+      await remapSettingsPaths(relPath(full), null);
       deleted.push(relPath(full));
     } catch (err) {
       failed.push({ path: String(rel), error: err.code === 'ENOENT' ? 'not found' : err.message });
     }
   }
   res.json({ deleted: deleted, failed: failed });
+}));
+
+// ---------- Folders ----------
+
+// "School/2026" -> full path. No hidden parts, nothing outside DATA_DIR.
+function safeDir(rel) {
+  if (typeof rel !== 'string') throw new Error('Missing folder name');
+  rel = rel.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!rel || rel.split('/').some((part) => part === '' || part === '.' || part === '..' || part.startsWith('.'))) {
+    throw new Error('Invalid folder name');
+  }
+  return safeFile(rel);
+}
+
+async function exists(full) {
+  return fs.stat(full).then(() => true).catch(() => false);
+}
+
+// Counts the files inside a folder (and its subfolders)
+async function countFiles(dir) {
+  let total = 0;
+  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    total += entry.isDirectory() ? await countFiles(path.join(dir, entry.name)) : 1;
+  }
+  return total;
+}
+
+// All .md files below a folder, as relative paths
+async function notesBelow(dir) {
+  return (await listNotes(dir)).map((n) => n.path);
+}
+
+// Create a folder (empty ones too). Never replaces an existing folder or file.
+app.post('/api/folders', handle(async (req, res) => {
+  const full = safeDir(req.body.path);
+  if (await exists(full)) throw conflictFolder(relPath(full));
+  await fs.mkdir(full, { recursive: true });
+  res.json({ path: relPath(full) });
+}));
+
+function conflictFolder(rel) {
+  const err = new Error('"' + rel + '" already exists');
+  err.status = 409;
+  return err;
+}
+
+// Rename a folder, or move it into another folder ("to" is the new full path).
+// Relative image links of the notes inside are fixed where the folder depth changes.
+app.post('/api/folders/rename', handle(async (req, res) => {
+  const from = safeDir(req.body.from);
+  const to = safeDir(req.body.to);
+  if (from === to) return res.json({ from: relPath(from), to: relPath(to) });
+  if (to.startsWith(from + path.sep)) throw new Error('A folder cannot go inside itself');
+  if (!(await fs.stat(from)).isDirectory()) throw new Error('Not a folder');
+  if (await exists(to)) throw conflictFolder(relPath(to));
+
+  await fs.mkdir(path.dirname(to), { recursive: true });
+  await fs.rename(from, to);
+
+  const moved = { from: relPath(from), to: relPath(to) };
+  for (const rel of await notesBelow(to)) {
+    const full = safeFile(rel);
+    const oldDir = path.posix.dirname(moved.from + rel.slice(moved.to.length));
+    const newDir = path.posix.dirname(rel);
+    const content = await fs.readFile(full, 'utf8');
+    const fixed = rewriteImageLinks(content, oldDir, newDir, moved);
+    if (fixed !== content) await fs.writeFile(full, fixed, 'utf8');
+  }
+  await remapSettingsPaths(moved.from, moved.to);
+  res.json(moved);
+}));
+
+// Delete a folder. A folder with files in it needs "force": true (the page asks first).
+app.delete('/api/folders', handle(async (req, res) => {
+  const full = safeDir(req.body.path);
+  if (!(await fs.stat(full)).isDirectory()) throw new Error('Not a folder');
+  const count = await countFiles(full);
+  if (count > 0 && !req.body.force) {
+    return res.status(409).json({ error: 'The folder has ' + count + ' file' + (count === 1 ? '' : 's') + ' in it', count: count });
+  }
+  await fs.rm(full, { recursive: true });
+  await remapSettingsPaths(relPath(full), null);
+  res.json({ ok: true, deleted: count });
 }));
 
 app.get('/api/search', handle(async (req, res) => {
@@ -354,32 +444,78 @@ app.get('/api/search', handle(async (req, res) => {
 // which means they are the same on every device that opens this notes folder.
 
 const SETTINGS_FILE = path.join(DATA_DIR, '.zvezek', 'settings.json');
-const PALETTE = ['pine', 'moss', 'lake', 'indigo', 'plum', 'berry', 'rust', 'slate'];   // colours of categories (see style.css)
+// Muted colours for categories and folders (see style.css). Older notes folders may still have the
+// first names of this list in settings.json, so they are renamed to the nearest new colour.
+const PALETTE = ['dusk', 'sage', 'clay', 'heather', 'ash', 'sand', 'teal', 'rose'];
+const OLD_COLOURS = { pine: 'teal', moss: 'sage', lake: 'dusk', indigo: 'ash', plum: 'heather', berry: 'rose', rust: 'clay', slate: 'sand' };
 const TAG_NAME = /^\p{L}[\p{L}\p{N}_-]*$/u;
 
 // What each setting must look like. Anything else in the file is ignored.
 const SETTING_CHECKS = {
   showInbox: (v) => typeof v === 'boolean',
   livePreview: (v) => typeof v === 'boolean',
+  wideEditor: (v) => typeof v === 'boolean',
+  showHidden: (v) => typeof v === 'boolean',
   maxFileMB: (v) => Number.isInteger(v) && v >= 1 && v <= 1000,
   categories: (v) => Array.isArray(v) && v.length <= 30
     && v.every((c) => c && typeof c.name === 'string' && c.name.length <= 30 && TAG_NAME.test(c.name) && PALETTE.includes(c.color))
     && new Set(v.map((c) => c.name.toLowerCase())).size === v.length,
+  hidden: (v) => Array.isArray(v) && v.length <= 2000 && v.every((p) => typeof p === 'string' && p.length > 0 && p.length <= 300),
+  folderColors: (v) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length <= 2000
+    && Object.entries(v).every(([k, c]) => k.length <= 300 && PALETTE.includes(c)),
 };
-const DEFAULT_SETTINGS = { showInbox: true, livePreview: true, maxFileMB: 25, categories: [] };
+const DEFAULT_SETTINGS = { showInbox: true, livePreview: true, wideEditor: false, showHidden: false, maxFileMB: 25, categories: [], hidden: [], folderColors: {} };
 
 function cleanSetting(key, value) {
   return key === 'categories' ? value.map((c) => ({ name: c.name, color: c.color })) : value;
 }
 
+// Old colour names in a settings file become the new ones
+function migrateColours(saved) {
+  if (Array.isArray(saved.categories)) {
+    saved.categories = saved.categories.map((c) => (c && OLD_COLOURS[c.color] ? { ...c, color: OLD_COLOURS[c.color] } : c));
+  }
+  if (saved.folderColors && typeof saved.folderColors === 'object') {
+    for (const key of Object.keys(saved.folderColors)) {
+      if (OLD_COLOURS[saved.folderColors[key]]) saved.folderColors[key] = OLD_COLOURS[saved.folderColors[key]];
+    }
+  }
+  return saved;
+}
+
 async function readSettings() {
   let saved = {};
-  try { saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8')); } catch (err) { /* no file yet, or not valid JSON */ }
+  try { saved = migrateColours(JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'))); } catch (err) { /* no file yet, or not valid JSON */ }
   const settings = {};
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     settings[key] = SETTING_CHECKS[key](saved[key]) ? cleanSetting(key, saved[key]) : DEFAULT_SETTINGS[key];
   }
   return settings;
+}
+
+async function writeSettings(settings) {
+  await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
+  await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n');
+}
+
+// A note or folder moved (to = its new path) or was deleted (to = null): hidden items and
+// folder colours follow it. Works for a folder too: everything below it moves along.
+async function remapSettingsPaths(from, to) {
+  const settings = await readSettings();
+  let changed = false;
+  const remap = (p) => {
+    if (p !== from && !p.startsWith(from + '/')) return p;
+    changed = true;
+    return to === null ? null : to + p.slice(from.length);
+  };
+  settings.hidden = settings.hidden.map(remap).filter((p) => p !== null);
+  const colours = {};
+  for (const [p, colour] of Object.entries(settings.folderColors)) {
+    const moved = remap(p);
+    if (moved !== null) colours[moved] = colour;
+  }
+  settings.folderColors = colours;
+  if (changed) await writeSettings(settings);
 }
 
 // "inbox" is the name of the inbox note, so the page knows which note to hide
@@ -395,8 +531,7 @@ app.put('/api/settings', handle(async (req, res) => {
     if (!SETTING_CHECKS[key](body[key])) throw new Error('Setting "' + key + '" is not valid');
     settings[key] = cleanSetting(key, body[key]);
   }
-  await fs.mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
-  await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n');
+  await writeSettings(settings);
   res.json({ ...settings, inbox: INBOX_FILE, palette: PALETTE });
 }));
 
@@ -459,6 +594,15 @@ app.post('/api/items', handle(async (req, res) => {
     if (!REPEAT_CHOICES[repeat]) throw new Error('Unknown repeat option');
     if (!req.body.date) throw new Error('Pick a date for a repeating item');
     line += ' repeat: ' + REPEAT_CHOICES[repeat];
+    // How it ends: never, on a date ("until"), or after some times ("count")
+    if (req.body.ends === 'date') {
+      if (!isRealDate(req.body.until)) throw new Error('Pick the date the repeat ends on');
+      line += ' until ' + req.body.until;
+    } else if (req.body.ends === 'count') {
+      const count = Number(req.body.count);
+      if (!Number.isInteger(count) || count < 1 || count > 999) throw new Error('Repeat count must be a number from 1 to 999');
+      line += ' count ' + count;
+    }
   }
   if (req.body.date) {
     line = setDate(line, req.body.date, req.body.time || null);

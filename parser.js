@@ -11,6 +11,7 @@
 //   - [ ] Water plants repeat: every week due:2026-11-09
 //   - Gym repeat: every monday, wednesday due:2026-11-09 18:00
 //   - Standup repeat: every weekday until 2026-12-20 due:2026-11-09 09:30
+//   - Course repeat: every week count 10 due:2026-11-09     (10 times in total, this one included)
 //
 // A ticked task gets "done:2026-11-08".
 //
@@ -87,16 +88,24 @@ function parseDayList(text) {
 }
 
 // Turns the text after 🔁 into a rule, or null when we do not understand it.
-//   rule = { unit: 'day' | 'week' | 'month' | 'year', every: 2, days: [1, 4] or null, until: 'YYYY-MM-DD' or null }
+//   rule = { unit: 'day' | 'week' | 'month' | 'year', every: 2, days: [1, 4] or null,
+//            until: 'YYYY-MM-DD' or null, count: 10 or null }
+// "until" and "count" are the two ways to end a series (use one of them).
 function parseRepeat(text) {
   let rest = text.trim().toLowerCase().replace(/\s+/g, ' ');
 
   let until = null;
+  let count = null;
   const untilMatch = rest.match(/ until (\d{4}-\d{2}-\d{2})$/);
+  const countMatch = rest.match(/ count (\d+)$/);
   if (untilMatch) {
     if (!isRealDate(untilMatch[1])) return null;
     until = untilMatch[1];
     rest = rest.slice(0, untilMatch.index);
+  } else if (countMatch) {
+    count = parseInt(countMatch[1], 10);
+    if (count < 1) return null;
+    rest = rest.slice(0, countMatch.index);
   }
 
   if (!rest.startsWith('every ')) return null;
@@ -123,11 +132,13 @@ function parseRepeat(text) {
 
   if (!rule) return null;
   rule.until = until;
+  rule.count = count;
   return rule;
 }
 
 // All dates of a repeating series that fall between "from" and "to" (inclusive).
 // The series starts at "start" (which counts as the first one, even if it is not on a listed weekday).
+// With rule.count the series has that many dates in total, "start" included.
 function occurrences(rule, start, from, to, max = 400) {
   const result = [];
   const stop = rule.until && rule.until < to ? rule.until : to;
@@ -137,12 +148,15 @@ function occurrences(rule, start, from, to, max = 400) {
   if (rule.days) {
     // Weekdays: go week by week (weeks start on Monday) and pick the listed days
     const monday = addDays(start, -((weekdayOf(start) + 6) % 7));
+    let n = 1;                                    // "start" is the first date
     for (let week = 0; week < 20000; week += rule.every) {
       const weekStart = addDays(monday, 7 * week);
       if (weekStart > stop) break;
       for (let offset = 0; offset < 7; offset++) {
         const date = addDays(weekStart, offset);
         if (date <= start || date > stop || !rule.days.includes(weekdayOf(date))) continue;
+        n++;
+        if (rule.count && n > rule.count) return result;
         if (date >= from) result.push(date);
         if (result.length >= max) return result;
       }
@@ -152,6 +166,7 @@ function occurrences(rule, start, from, to, max = 400) {
 
   const startDay = toDate(start).getUTCDate();
   for (let k = 1; k < 100000; k++) {
+    if (rule.count && k >= rule.count) break;
     let date;
     if (rule.unit === 'day') date = addDays(start, k * rule.every);
     else if (rule.unit === 'week') date = addDays(start, 7 * k * rule.every);
@@ -188,7 +203,7 @@ function findDate(text) {
 
   let repeat = null;
   if (rule) {
-    repeat = { text: repeatMatch[1].replace(/\s+until \d{4}-\d{2}-\d{2}\s*$/i, '').trim(), until: rule.until };
+    repeat = { text: repeatMatch[1].replace(/\s+(?:until \d{4}-\d{2}-\d{2}|count \d+)\s*$/i, '').trim(), until: rule.until, count: rule.count };
   }
 
   return {
@@ -300,7 +315,9 @@ function editLine(line, fields) {
 
   const title = String(pick('title', info.title)).replace(/\s+/g, ' ').trim();
   const category = pick('category', info.category || '');
-  const oldRepeat = info.repeat ? info.repeat.text + (info.repeat.until ? ' until ' + info.repeat.until : '') : '';
+  const oldRepeat = info.repeat
+    ? info.repeat.text + (info.repeat.until ? ' until ' + info.repeat.until : '') + (info.repeat.count ? ' count ' + info.repeat.count : '')
+    : '';
   const repeat = String(pick('repeat', oldRepeat)).trim();
   const date = pick('date', info.date || '');
   const time = fields.date === undefined && fields.time === undefined ? info.time : fields.time || null;
@@ -330,8 +347,11 @@ function completeTask(line, today) {
 
   const done = modernize(setDone(line, true)).replace(DONE_DATE_REGEX, '').trimEnd() + ' done:' + today;
   const next = nextDate(repeat.rule, repeat.date);
-  if (!next) return [done];                      // the series has ended ("until")
-  return [setDate(line, next, repeat.time).replace(DONE_DATE_REGEX, ''), done];
+  if (!next) return [done];                      // the series has ended ("until" or "count")
+  let open = setDate(line, next, repeat.time).replace(DONE_DATE_REGEX, '');
+  // "count 10" is what is left, so the new line has one less
+  if (repeat.rule.count) open = open.replace(/\bcount\s+\d+/, 'count ' + (repeat.rule.count - 1));
+  return [open, done];
 }
 
 // Unticking: back to open, and the ✅ date goes away

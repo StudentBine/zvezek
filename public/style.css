@@ -511,18 +511,9 @@ main {
   color: var(--stone);
 }
 
-/* small dot: green when saved, outlined while typing, red on error */
-#save-state:not(:empty)::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--moss);
-}
-
-#save-state[data-state="unsaved"]::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--stone); }
-#save-state[data-state="not-saved"] { color: var(--danger); }
-#save-state[data-state="not-saved"]::before { background: var(--danger); }
+/* Quiet: nothing is shown while all is fine. Only a failed save speaks up. */
+#save-state:not([data-state="offline"]) { display: none; }
+#save-state[data-state="offline"] { color: var(--danger); font-weight: 600; }
 
 button.primary {
   padding: 8px 16px;
@@ -630,16 +621,10 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 .tab:hover { background: var(--moss-soft); color: var(--granite); }
 
 .tab.active {
-  margin-bottom: -1px;             /* sits on top of the strip's bottom line */
-  padding-bottom: 8px;
-  border-color: var(--mist);
-  background: var(--paper);
+  background: var(--moss-soft);
+  border-color: transparent;
   color: var(--granite);
-  box-shadow: inset 0 2px 0 var(--pine);
-}
-
-@media (prefers-color-scheme: dark) {
-  .tab.active { box-shadow: inset 0 2px 0 var(--moss); }
+  font-weight: 700;
 }
 
 .tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -728,7 +713,30 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.editor-wrap .EasyMDEContainer.sided--no-fullscreen {
+  position: relative;
+  grid-template-columns: minmax(0, calc(var(--split, 0.5) * 100%)) minmax(0, 1fr);
+}
+
 .sided--no-fullscreen .editor-toolbar { grid-column: 1 / -1; width: auto; }
+
+/* The draggable line between the writing area and the preview (only in side-by-side) */
+#split-handle { display: none; }
+.sided--no-fullscreen #split-handle {
+  display: block;
+  position: absolute;
+  top: 47px;
+  bottom: 0;
+  left: calc(var(--split, 0.5) * 100%);
+  width: 9px;
+  margin-left: -4px;
+  z-index: 20;                /* above the preview and the editor: grid items use z-index even when static */
+  cursor: col-resize;
+}
+.sided--no-fullscreen #split-handle::after { content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: var(--mist); }
+.sided--no-fullscreen #split-handle:hover::after, .sided--no-fullscreen #split-handle:focus-visible::after, body.splitting #split-handle::after { left: 3px; width: 3px; background: var(--focus); }
+#split-handle:focus-visible { outline: none; }
+body.splitting { cursor: col-resize; user-select: none; }
 .sided--no-fullscreen .CodeMirror-sided { width: auto !important; height: 100%; min-height: 0; border-right: 1px solid var(--mist) !important; }
 .sided--no-fullscreen .editor-preview-side { position: static; width: auto; min-height: 0; height: 100%; border: 0; }
 
@@ -801,6 +809,8 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 }
 
 .CodeMirror-lines { max-width: 70ch; }
+body.wide-editor .CodeMirror-lines,
+.sided--no-fullscreen .CodeMirror-lines { max-width: none; }
 .CodeMirror pre.CodeMirror-line,
 .CodeMirror pre.CodeMirror-line-like { padding: 0 2px; }
 .CodeMirror-cursor { border-left-color: var(--granite); }
@@ -829,6 +839,8 @@ button.quiet:hover { color: var(--granite); border-color: var(--stone); }
 
 .editor-preview > *,
 .editor-preview-side > * { max-width: 68ch; }
+body.wide-editor .editor-preview > *,
+.sided--no-fullscreen .editor-preview-side > * { max-width: none; }
 
 .editor-preview h1, .editor-preview h2, .editor-preview h3,
 .editor-preview-side h1, .editor-preview-side h2, .editor-preview-side h3 {
@@ -1339,7 +1351,7 @@ dialog label {
   color: var(--stone);
 }
 
-dialog input[type="text"], dialog input:not([type]), dialog input[type="date"], dialog input[type="time"] {
+dialog input[type="text"], dialog input:not([type]), dialog input[type="date"], dialog input[type="time"], dialog input[type="number"] {
   padding: 9px 10px;
   border: 1px solid var(--mist);
   border-radius: var(--radius-small);
@@ -1572,25 +1584,26 @@ dialog .actions {
 
 /* ================= Categories ================= */
 
-/* Eight colours that sit next to the pine green. No yellow: marigold only means today / due. */
-.cat-pine { --cat: #2F6B57; }
-.cat-moss { --cat: #6B8F4E; }
-.cat-lake { --cat: #3E7CA6; }
-.cat-indigo { --cat: #5B6FB5; }
-.cat-plum { --cat: #8A5A9E; }
-.cat-berry { --cat: #B04A6B; }
-.cat-rust { --cat: #B5603A; }
-.cat-slate { --cat: #6F7A74; }
+/* Eight muted colours for categories and folders. Quiet next to pine and snow: marigold stays the only
+   loud colour (today and due dates). Light and dark versions. */
+.cat-dusk { --cat: #5F7E99; }
+.cat-sage { --cat: #7B8F6E; }
+.cat-clay { --cat: #A57560; }
+.cat-heather { --cat: #86708F; }
+.cat-ash { --cat: #6E7B86; }
+.cat-sand { --cat: #A39370; }
+.cat-teal { --cat: #5E8582; }
+.cat-rose { --cat: #A07884; }
 
 @media (prefers-color-scheme: dark) {
-  .cat-pine { --cat: #5FA68B; }
-  .cat-moss { --cat: #9DBF7F; }
-  .cat-lake { --cat: #7FB2D6; }
-  .cat-indigo { --cat: #98A8E0; }
-  .cat-plum { --cat: #BE94D2; }
-  .cat-berry { --cat: #DB8FA8; }
-  .cat-rust { --cat: #E39A76; }
-  .cat-slate { --cat: #A5B0AA; }
+  .cat-dusk { --cat: #8FAAC2; }
+  .cat-sage { --cat: #A3B596; }
+  .cat-clay { --cat: #C99C87; }
+  .cat-heather { --cat: #B39DBC; }
+  .cat-ash { --cat: #A0ABB4; }
+  .cat-sand { --cat: #C9BC9A; }
+  .cat-teal { --cat: #8DB3B0; }
+  .cat-rose { --cat: #C69FAA; }
 }
 
 /* Calendar: tasks get a coloured checkbox, events a light tint of the colour */
@@ -1655,7 +1668,7 @@ dialog .actions {
 }
 
 .popover label.check { flex-direction: row; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; color: var(--granite); }
-.popover input[type="text"], .popover input:not([type]), .popover input[type="date"], .popover input[type="time"], .popover select,
+.popover input[type="text"], .popover input:not([type]), .popover input[type="date"], .popover input[type="time"], .popover input[type="number"], .popover select,
 dialog .number-row input {
   padding: 8px 10px;
   border: 1px solid var(--mist);
@@ -1716,3 +1729,121 @@ dialog .hint.flush { margin-left: 0; }
 .file-card p { margin: 0; color: var(--stone); }
 .file-card a.primary { margin-top: 12px; padding: 9px 18px; border-radius: var(--radius-small); background: var(--pine); color: #fff; font-weight: 600; text-decoration: none; }
 .file-note { padding: 10px 22px; font-size: 13px; color: var(--stone); border-top: 1px solid var(--mist); }
+
+/* ================= Full view (writing mode) ================= */
+
+body.full-view { grid-template-columns: 1fr !important; }
+body.full-view #sidebar, body.full-view #sidebar-resizer, body.full-view #mini-nav,
+body.full-view #tabs, body.full-view #view-notes > .view-head, body.full-view #draft-bar,
+body.full-view #tabbar, body.full-view #menu-toggle { display: none !important; }
+body.full-view .view { padding: 0 24px 24px; }
+body.full-view .editor-wrap { align-items: center; }
+body.full-view .editor-wrap .EasyMDEContainer { width: 100%; max-width: 920px; border-color: transparent; box-shadow: none; background: transparent; }
+body.full-view .editor-wrap .EasyMDEContainer.sided--no-fullscreen { max-width: none; }
+body.full-view .EasyMDEContainer .CodeMirror, body.full-view .editor-preview, body.full-view .editor-preview-side { background: transparent; }
+/* The toolbar keeps its place but is invisible until the mouse is over it or it has the keyboard focus */
+body.full-view .editor-toolbar { opacity: 0; transition: opacity 0.15s; border-bottom-color: transparent; }
+body.full-view .editor-toolbar:hover, body.full-view .editor-toolbar:focus-within { opacity: 1; }
+
+/* ================= Quiet saving ================= */
+
+#draft-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--mist);
+  border-radius: var(--radius-small);
+  background: var(--paper);
+  font-size: 14px;
+}
+#draft-bar[hidden] { display: none; }
+#draft-bar span { flex: 1; }
+#draft-bar button { padding: 4px 12px; font-size: 13px; }
+
+/* ================= Sidebar: folders, menu, drag and drop ================= */
+
+#note-list summary { display: flex; align-items: center; gap: 6px; }
+#note-list summary .folder-icon { width: 15px; height: 15px; flex-shrink: 0; fill: none; stroke: var(--cat); stroke-width: 1.8; stroke-linejoin: round; }
+#note-list summary .folder-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#note-list summary .hidden-mark, #note-list .note-link .hidden-mark { margin-left: auto; font-size: 11px; font-weight: 400; opacity: 0.7; }
+#note-list .is-hidden .note-link, #note-list details.is-hidden > summary { opacity: 0.55; }
+#note-list .empty-folder { margin: 2px 0 0 12px; padding: 2px 8px 2px 16px; font-size: 12px; color: var(--side-dim); opacity: 0.7; }
+
+/* While dragging: the folder under the mouse gets a ring, so it is clear where things land */
+#note-list .drop-target > summary, #note-list summary.drop-target { background: rgba(255, 255, 255, 0.14); outline: 2px solid #A9C7B6; outline-offset: -2px; border-radius: var(--radius-small); }
+#note-list.drop-root { outline: 2px dashed #A9C7B6; outline-offset: -3px; border-radius: var(--radius-small); }
+#note-list .dragging { opacity: 0.45; }
+
+#context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 190px;
+  padding: 5px;
+  border: 1px solid var(--mist);
+  border-radius: var(--radius-small);
+  background: var(--paper);
+  color: var(--granite);
+  box-shadow: 0 10px 28px rgba(20, 40, 32, 0.22);
+}
+#context-menu[hidden] { display: none; }
+#context-menu button { display: block; width: 100%; padding: 7px 10px; border: 0; border-radius: 4px; background: transparent; color: inherit; font-size: 14px; text-align: left; }
+#context-menu button:hover, #context-menu button:focus-visible { background: var(--moss-soft); outline: none; }
+#context-menu hr { margin: 4px 2px; border: 0; border-top: 1px solid var(--mist); }
+#context-menu .swatches { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 10px; }
+#context-menu .swatch { width: 18px; height: 18px; padding: 0; border: 2px solid transparent; border-radius: 50%; background: var(--cat); }
+#context-menu .swatch.on { border-color: var(--granite); }
+#context-menu .swatch.none { background: transparent; border: 1px dashed var(--stone); }
+#context-menu button.danger { color: #8E3324; }
+
+/* ================= Settings: shortcuts, folders ================= */
+
+#settings-dialog { width: min(480px, calc(100vw - 32px)); max-height: 86vh; overflow-y: auto; }
+.shortcut-list { display: grid; grid-template-columns: 1fr auto; gap: 5px 14px; margin: 8px 0 0; font-size: 13px; }
+.shortcut-list dt { color: var(--granite); }
+.shortcut-list dd { margin: 0; text-align: right; color: var(--stone); }
+kbd { padding: 1px 6px; border: 1px solid var(--mist); border-radius: 4px; background: var(--snow); font: 12px/1.5 var(--ui); color: var(--granite); }
+.hidden-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.hidden-row { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.hidden-row span { flex: 1; overflow-wrap: anywhere; }
+.hidden-row button { padding: 3px 10px; font-size: 13px; }
+
+/* ================= Scrollbars ================= */
+/* Thin and quiet. They get a little stronger when the mouse is over the scrolling area.
+   (Chrome and Firefox both use the standard scrollbar-color; old Safari uses the webkit rules below.) */
+
+:root { --sb-idle: rgba(46, 50, 54, 0.16); --sb-hover: rgba(46, 50, 54, 0.38); }
+@media (prefers-color-scheme: dark) { :root { --sb-idle: rgba(228, 232, 229, 0.14); --sb-hover: rgba(228, 232, 229, 0.34); } }
+
+* { scrollbar-width: thin; scrollbar-color: var(--sb-idle) transparent; }
+*:hover { scrollbar-color: var(--sb-hover) transparent; }
+#sidebar { --sb-idle: rgba(255, 255, 255, 0.14); --sb-hover: rgba(255, 255, 255, 0.34); }
+#tabs { scrollbar-width: none; }      /* the tab bar keeps its hidden scrollbar */
+
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 6px; background: var(--sb-idle); background-clip: padding-box; }
+  :hover::-webkit-scrollbar-thumb { background: var(--sb-hover); background-clip: padding-box; }
+  #tabs::-webkit-scrollbar { display: none; }
+}
+
+.head-buttons { display: flex; gap: 6px; }
+#new-folder { width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-small); background: rgba(255, 255, 255, 0.1); color: #fff; }
+#new-folder svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+#new-folder:hover { background: #fff; color: var(--pine-deep); }
+.ends-row[hidden], .ends-row label[hidden] { display: none; }
+dialog .ends-row { margin-top: 12px; }
+.popover .ends-row { margin: 0; }
+
+.menu-note { margin: 0; padding: 6px 10px; font-size: 13px; color: var(--stone); }
+
+/* In the sidebar (always dark) folders use the light versions of the colours */
+#note-list .cat-dusk { --cat: #8FAAC2; } #note-list .cat-sage { --cat: #A3B596; } #note-list .cat-clay { --cat: #C99C87; }
+#note-list .cat-heather { --cat: #B39DBC; } #note-list .cat-ash { --cat: #A0ABB4; } #note-list .cat-sand { --cat: #C9BC9A; }
+#note-list .cat-teal { --cat: #8DB3B0; } #note-list .cat-rose { --cat: #C69FAA; }
+
+/* No edge at all on calendar events: FullCalendar draws a 1px (transparent) border by default */
+.fc .fc-event { border-width: 0; }
+
+.note-link { cursor: pointer; }

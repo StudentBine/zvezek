@@ -22,14 +22,14 @@ In the editor and the preview, a due date is drawn as a quiet chip such as `Thu 
 
 - **Calendar:** click the circle to tick a task, click the text to open its note, drag to change the date (the `.md` file is updated), click an empty day to add something. The calendar has no scrollbars of its own: the month grows to show every item of a day (a day only gets "+N more" from 9 items), and the week shows 06:00 to 24:00 (earlier items extend the range).
 - **Tasks:** grouped into Overdue, Today, Next 7 days, Later, No date and Done.
-- **Notes:** autosave, folders (name a note `School/RIRS` to put it in a folder), search, `[[wiki links]]`.
+- **Notes:** saved automatically (see *Saving*), folders (name a note `School/RIRS` to put it in a folder), search, `[[wiki links]]`.
 - Quick add puts new items into `Inbox.md`.
 
 ## Categories
 
 A category is a `#tag` on a task or event line: `- [ ] RIRS kolokvij #kolokvij due:2026-11-13` (the first tag counts, and a tag must start with a letter, so `#123` is not one). The tag is hidden in calendar and Tasks titles.
 
-- **Settings:** add categories, pick one of 8 colours, reorder with the arrows. They are saved in `.zvezek/settings.json`. Renaming a category does not rewrite your notes: it only changes which tag the colour belongs to.
+- **Settings:** add categories, pick one of 8 muted colours (dusk, sage, clay, heather, ash, sand, teal, rose), reorder with the arrows. They are saved in `.zvezek/settings.json`. Renaming a category does not rewrite your notes: it only changes which tag the colour belongs to.
 - **Calendar:** tasks get a coloured checkbox, events a light tint. The toggles above the calendar show or hide categories (remembered in the browser).
 - **Tasks:** *By date* or *By category* (remembered).
 - **Edit from the calendar or Tasks view:** click an item (the round checkbox still ticks it) for a small popover with title, date, time, category, repeat and done, plus *Open note* and *Delete*. Saving rewrites only that line, and is refused with a message if the note changed in the meantime.
@@ -46,11 +46,18 @@ A category is a `#tag` on a task or event line: `- [ ] RIRS kolokvij #kolokvij d
 The rules are the ones of the Obsidian Tasks plugin, and its emoji spelling (`🔁 every week 📅 2026-11-09`) is still read.
 
 Rules: `every day`, `every N days`, `every week`, `every N weeks`, `every month`, `every N months`, `every year`,
-`every weekday`, and lists like `every monday, thursday` (also `every 2 weeks on friday`). An optional `until YYYY-MM-DD` ends the series.
+`every weekday`, and lists like `every monday, thursday` (also `every 2 weeks on friday`). A series can end in one of two ways (use one of them):
+
+```markdown
+- Standup repeat: every weekday until 2026-12-20 due:2026-11-09 09:30    ends on that date (it can still be the last one)
+- Course repeat: every week count 10 due:2026-11-09                       10 times in total, this one included
+```
+
+The Add dialog and the edit popover have an *Ends* option for this: Never, On date, After N times. Nothing is shown in the calendar after the end. `count` is "how many are left, counting this line": when you tick a task, the new line gets `count 9`, and ticking the last one (`count 1`) adds no new line.
 A rule that is not understood is left alone: the line stays a normal item and the text stays in the title.
 
 - **Events** show every occurrence in the visible calendar range. The line's own date is the first one.
-- **Tasks:** only the line itself is a real task. The next 3 occurrences are shown faded in the calendar. When you tick it, that line gets `[x]` and `done:<today>`, and a new open line with the next date is inserted directly above it (the way Obsidian Tasks does it). The next date is counted from the due date, not from the day you tick. After the last date of an `until` series, no new line is added.
+- **Tasks:** only the line itself is a real task. The next 3 occurrences are shown faded in the calendar. When you tick it, that line gets `[x]` and `done:<today>`, and a new open line with the next date is inserted directly above it (the way Obsidian Tasks does it). The next date is counted from the due date, not from the day you tick. After the last date of an `until` series, or after the last `count`, no new line is added.
 - Faded copies cannot be clicked, ticked or dragged. Dragging the real item moves the whole series (its `due:` date).
 - Months: a date that does not exist in a month becomes the last day of it (the 31st gives Feb 28, then Mar 31). Note that when a repeating *task* is ticked, the next date is calculated from the previous one, so a 31st can settle on the 28th.
 - The Add dialog has a *Repeat* select (none, every day, weekday, week, month, year).
@@ -101,11 +108,66 @@ In the editor, the marks of bold, italic, `~~strikethrough~~`, `code`, headings 
 ## Sidebar
 
 - **Several notes:** Ctrl/Cmd+click toggles a note, Shift+click selects a range. With 2 or more selected, an action bar offers *Move to folder* (existing folder, top level, or a new one), *Delete* and *Clear* (Esc also clears). A move never overwrites a note that already exists in the target folder.
-- **Hide:** the button at the top of the sidebar, or Ctrl/Cmd+`\`. A small bar at the top left switches views and brings the sidebar back.
+- **Hide the sidebar:** the button at the top of the sidebar, or Ctrl/Cmd+L (the browser's own "go to address bar" is switched off while Zvezek has focus). A small bar at the top left switches views and brings the sidebar back.
 - **Resize:** drag the right edge (200 to 480 px), double-click to reset, or focus the edge and use the arrow keys.
 - Width and hidden state are remembered in the browser. The phone layout is not affected.
 
 - **Settings** (bottom of the sidebar): *Show Inbox in sidebar*. When it is off, `Inbox.md` is hidden from the list, quick add still writes to it, and search still finds it. Settings are saved in `DATA_DIR/.zvezek/settings.json` (a hidden folder), so they are the same on every device.
+
+## Folders
+
+- **New folder** (the folder button next to the + in the sidebar, or right-click a folder > *New subfolder*, or right-click the empty list). Empty folders stay in the sidebar and are kept on disk.
+- **Drag and drop:** drag a note or file onto a folder to move it, or onto the top-level part of the list to move it out. Dragging a selected note takes the whole selection. A folder can be dragged onto another folder, but not into itself or its own subfolders. The folder under the mouse gets a ring while you drag.
+- **Right-click a folder:** rename or move (type the new full path, for example `School/2027`), colour, hide, delete. A folder with files is only deleted after a question that says how many files are inside.
+- **Colour:** the same 8 muted colours as categories, shown as a small coloured folder icon (not a coloured row).
+- Moving a note keeps its relative image links working (as before). Moving a whole folder keeps links inside the folder as they are and fixes links that point outside it.
+- Open tabs, hidden items and folder colours follow when things move or are renamed.
+
+## Hiding notes
+
+Right-click a note, file or folder > *Hide* (or *Hide* in the bar that appears when several are selected). Hidden items leave the sidebar but are still found by search, and their tasks stay in the calendar and Tasks view. In Settings: *Show hidden notes in the sidebar*, and the list of hidden items with an *Unhide* button for each. The list is part of `.zvezek/settings.json`, and a hidden item stays hidden when it is moved or renamed.
+
+## Saving
+
+- Every change is written at once to a local draft in the browser (`localStorage`).
+- The note is sent to the server 2.5 seconds after you stop typing, and at least every 15 seconds while you keep typing. It is also saved when you switch tab, open another note, change view, leave the window, hide the page, or close it.
+- If the server cannot be reached the draft stays, saving is tried again (2 s, 4 s, 8 s ... at most a minute), and the note header says *Offline, saved locally*. When saving works again the draft is removed. While everything is fine nothing is shown.
+- When you open a note and a local draft is newer than the saved note, a small bar offers *Restore* or *Discard*. (The check compares the draft's time in your browser with the file's time on the server, so a very wrong clock on one of them can confuse it.)
+- A note bigger than 64 KB cannot be sent in the last moment before the page closes (browser limit). Its draft is kept and offered next time.
+
+## Full view
+
+*Full view* in the note header, or Alt+Shift+F, hides the sidebar, the tabs and the header. Only the editor is left, centred (full width with side by side). The toolbar shows when the mouse is at the top or it has focus. Esc or the same shortcut leaves it.
+
+## Side by side and width
+
+Side by side uses the full width, with a draggable line between the editor and the preview (double-click it to reset; the place is remembered). In normal mode the text keeps a comfortable reading width; *Wide editor* in Settings turns that limit off.
+
+## Keyboard shortcuts
+
+(Cmd instead of Ctrl on a Mac.) The same list is in Settings.
+
+| Shortcut | What it does |
+| --- | --- |
+| Ctrl+L | show or hide the sidebar (replaces Ctrl+\) |
+| Alt+Shift+N / C / K | go to Notes / Calendar / Tasks |
+| Alt+Shift+F | full view |
+| Ctrl+S | save now |
+| Alt+PageUp / Alt+PageDown, Alt+W | previous or next tab, close tab |
+| Ctrl+B, Ctrl+I, Ctrl+K | bold, italic, link |
+| Ctrl+Shift+8 / Ctrl+Shift+7 | bullet list / numbered list (the bullet list used to be Ctrl+L) |
+| Ctrl+Shift+L | task list |
+| Ctrl+P, F9 | preview, side by side |
+| Tab / Shift+Tab | indent / outdent a list item |
+| Esc | close a menu or popover, leave full view |
+
+Why these: Alt+Shift+T would clash with "focus the toolbar" in Chrome, so Tasks is **K**. No Alt+digit, Ctrl+digit or Ctrl+Alt+T is used. Letters are read from the key you press, and the physical key is the fallback.
+
+## Enter in lists
+
+- An indented line that is not a list item: Enter starts the new line with no indent (inside a ``` code block the indent is kept).
+- A list item with text: Enter continues the list at the same level (numbers too).
+- An empty list item: Enter moves it out one level; at the top level the marker is removed and an empty line is left.
 
 ## Typing
 

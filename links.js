@@ -23,7 +23,9 @@ function encodePath(path) {
 
 // Returns the new link text for one link, or null to leave it as it is.
 // fromDir and toDir are folders relative to the notes folder: "" (top level), "School", "A/B".
-function newLink(link, fromDir, toDir) {
+// moved (optional): { from, to } when a whole folder moves. A link to a file inside that folder
+// moves along with it, so it keeps working and is left as it is.
+function newLink(link, fromDir, toDir, moved) {
   const angle = link.startsWith('<') && link.endsWith('>');
   const text = angle ? link.slice(1, -1) : link;
   if (NOT_RELATIVE.test(text)) return null;
@@ -49,6 +51,13 @@ function newLink(link, fromDir, toDir) {
     }
   }
 
+  if (moved) {
+    const source = parts(moved.from);
+    if (target.length > source.length && source.every((p, i) => target[i] === p)) {
+      target.splice(0, source.length, ...parts(moved.to));
+    }
+  }
+
   // Path from the new folder to the same file
   const to = parts(toDir);
   let common = 0;
@@ -59,24 +68,24 @@ function newLink(link, fromDir, toDir) {
   return (angle ? '<' + relative + suffix + '>' : encodePath(relative) + suffix);
 }
 
-function rewriteLine(line, fromDir, toDir) {
+function rewriteLine(line, fromDir, toDir, moved) {
   // Do not touch `inline code`: only every second piece is real text
   return line.split(/(`+[^`]*`+)/).map((piece, i) => {
     if (i % 2 === 1) return piece;
     piece = piece.replace(MARKDOWN_IMAGE, (all, start, link, end) => {
-      const fixed = newLink(link, fromDir, toDir);
+      const fixed = newLink(link, fromDir, toDir, moved);
       return fixed === null ? all : start + fixed + end;
     });
     return piece.replace(HTML_IMAGE, (all, start, quote, link) => {
-      const fixed = newLink(link, fromDir, toDir);
+      const fixed = newLink(link, fromDir, toDir, moved);
       return fixed === null ? all : start + quote + fixed + quote;
     });
   }).join('');
 }
 
 // content: the markdown text. Returns the text with image links fixed for the new folder.
-function rewriteImageLinks(content, fromDir, toDir) {
-  if (parts(fromDir).join('/') === parts(toDir).join('/')) return content;
+function rewriteImageLinks(content, fromDir, toDir, moved) {
+  if (!moved && parts(fromDir).join('/') === parts(toDir).join('/')) return content;
 
   let inFence = false;
   return content.split('\n').map((line) => {
@@ -84,7 +93,7 @@ function rewriteImageLinks(content, fromDir, toDir) {
       inFence = !inFence;
       return line;
     }
-    return inFence ? line : rewriteLine(line, fromDir, toDir);
+    return inFence ? line : rewriteLine(line, fromDir, toDir, moved);
   }).join('\n');
 }
 
